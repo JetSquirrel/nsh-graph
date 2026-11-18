@@ -1,0 +1,71 @@
+name: Pages
+
+# Builds the showcase site: the landing page in site/, plus the example app and the dataset gallery
+# packaged for the web with NSH, and deploys it to GitHub Pages.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  NSH_VERSION: v0.6.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NSH
+        run: |
+          curl -fsSL https://nsh.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Add the web runtime
+        run: |
+          nsh --version
+          nsh component add web
+
+      - name: Package the demo and the gallery
+        run: |
+          nsh package --target web -o build/demo example
+          nsh package --target web -o build/gallery example/Gallery.tsx
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site/demo _site/gallery
+          cp -r site/. _site/
+          # nsh names its output folder after the app; take whatever single folder it made.
+          cp -r build/demo/*/. _site/demo/
+          cp -r build/gallery/*/. _site/gallery/
+          # Pages compresses on its own; the precompressed copies only add weight.
+          find _site -name '*.br' -delete -o -name '*.gz' -delete
+          touch _site/.nojekyll
+          du -sh _site
+          ls _site _site/demo
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

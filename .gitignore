@@ -1,3 +1,5 @@
 .nsh/
 target/
 node_modules/
+build/
+_site/

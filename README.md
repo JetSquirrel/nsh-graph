@@ -3,6 +3,8 @@
 An interactive network graph view for [Native Shell (NSH)](https://nsh.dev), written in TSX. It draws on NSH's
 native `<Canvas>`, so it runs on every NSH platform: iOS, Android, macOS, Windows, Linux, GPUI, and the web.
 
+**[Live demo and showcase →](https://jetsquirrel.github.io/nsh-graph/)** ([gallery](https://jetsquirrel.github.io/nsh-graph/gallery/))
+
 Its design draws on [gpui-graph](https://github.com/JetSquirrel/gpui-graph) (force model, community hulls, keyboard
 model) and on [Neo4j NVL](https://neo4j.com/docs/nvl/current/) (data model, controller methods, layouts).
 
