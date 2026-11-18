@@ -1,0 +1,10 @@
+{
+  "name": "nsh-graph bench",
+  "id": "dev.nshgraph.bench",
+  "version": "0.0.0",
+  "build": 1,
+  "nsh": ">=0.6",
+  "resolve": {
+    "alias": { "nsh-graph": "../src/index.ts" }
+  }
+}

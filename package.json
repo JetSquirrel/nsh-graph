@@ -1,0 +1,18 @@
+{
+  "name": "nsh-graph",
+  "version": "0.1.0",
+  "description": "An interactive network graph view for Native Shell (NSH), written in TSX: force, hierarchical, circular and grid layouts on a native canvas.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "keywords": ["nsh", "native-shell", "graph", "network", "force-directed", "neo4j", "visualization"],
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src", "README.md", "LICENSE", "!**/.nsh"],
+  "scripts": {
+    "check": "nsh check example",
+    "test": "nsh test example",
+    "dev": "nsh run example",
+    "dev:web": "nsh run example --target web"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "nsh-graph-bench",
+  "private": true,
+  "description": "Compares nsh-graph's layout with other JS graph layout engines inside NSH's QuickJS runtime.",
+  "dependencies": {
+    "d3-force": "3.0.0",
+    "graphology": "0.26.0",
+    "graphology-layout-forceatlas2": "0.10.1"
+  }
+}
