@@ -24,7 +24,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install NSH
         run: |
@@ -54,11 +54,13 @@ jobs:
           du -sh _site
           ls _site _site/demo
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
+          # Since v4 dotfiles are left out by default; keep them (.nojekyll, and whatever nsh's web build writes).
+          include-hidden-files: true
 
   deploy:
     needs: build
@@ -68,4 +70,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
