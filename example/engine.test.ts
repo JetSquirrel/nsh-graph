@@ -113,6 +113,115 @@ describe("data", () => {
     expect(events).toEqual(["node", "none"]);
   });
 
+  test("selects several nodes: add, toggle, remove, and the primary one is the last added", () => {
+    const engine = sized();
+    const events: number[] = [];
+    engine.onEvent = (e) => e.type === "selection" && events.push(e.selection?.kind === "node" ? e.selection.nodes.length : 0);
+    engine.setData(chain(4));
+    engine.selectNodes(["n0", "n2", "missing"]);
+    let sel = engine.selection();
+    expect(sel?.kind === "node" && sel.nodes.map((n) => n.id)).toEqual(["n0", "n2"]);
+    expect(sel?.kind === "node" && sel.node.id).toBe("n2");
+    engine.selectNodes(["n3"], "add");
+    engine.selectNodes(["n0"], "toggle");
+    sel = engine.selection();
+    expect(sel?.kind === "node" && sel.nodes.map((n) => n.id)).toEqual(["n2", "n3"]);
+    engine.selectNodes(["n3"], "remove");
+    expect(engine.selected).toEqual({ kind: "node", id: "n2" });
+    engine.selectNodes(["n2"], "add"); // no change, no event
+    expect(events).toEqual([2, 3, 2, 1]);
+    // Selecting an edge lets the nodes go.
+    engine.setSelected({ kind: "edge", id: engine.edges[0].id });
+    expect(engine.selectedNodes.size).toBe(0);
+    engine.selectNodes(["n1"], "add");
+    expect(engine.selection()?.kind).toBe("node");
+  });
+
+  test("a data change keeps the selected nodes that are still there", () => {
+    const engine = sized();
+    engine.setData(chain(4));
+    engine.selectNodes(["n1", "n3"]);
+    engine.setData(chain(3));
+    const sel = engine.selection();
+    expect(sel?.kind === "node" && sel.nodes.map((n) => n.id)).toEqual(["n1"]);
+    expect(engine.selected).toEqual({ kind: "node", id: "n1" });
+  });
+
+  test("a selection box selects the nodes inside it, adding to what was selected", () => {
+    const engine = sized({ layout: "grid" });
+    engine.setData({ nodes: ["a", "b", "c", "d"].map((id) => ({ id })), edges: [] });
+    engine.fit(false);
+    const at = (id: string) => {
+      const p = engine.position(id)!;
+      return engine.graphToScreen(p.x, p.y);
+    };
+    const [a, b, c, d] = ["a", "b", "c", "d"].map(at);
+    engine.setSelected({ kind: "node", id: "a" });
+    engine.marqueeStart(Math.min(b.x, d.x) - 5, Math.min(b.y, d.y) - 5, true);
+    engine.marqueeMove(Math.max(b.x, d.x) + 5, Math.max(b.y, d.y) + 5);
+    expect([...engine.selectedNodes].sort()).toEqual(["a", "b", "d"]);
+    // Shrinking the box lets go of what left it, but never of what was selected before.
+    engine.marqueeMove(b.x + 5, b.y + 5);
+    expect([...engine.selectedNodes].sort()).toEqual(["a", "b"]);
+    engine.marqueeEnd();
+    expect(engine.marquee).toBeNull();
+    expect(engine.nodesInRect(c.x + 5, c.y + 5, c.x - 5, c.y - 5)).toEqual(["c"]);
+  });
+
+  test("dragging one of the selected nodes moves them all, and only the dragged one with stickyDrag off", () => {
+    const engine = sized({ layout: "grid" });
+    engine.setData({ nodes: ["a", "b", "c"].map((id) => ({ id })), edges: [] });
+    engine.fit(false);
+    engine.selectNodes(["a", "b"]);
+    const before = ["a", "b", "c"].map((id) => ({ ...engine.position(id)! }));
+    const a = engine.engineNode("a")!;
+    const s = engine.graphToScreen(a.x, a.y);
+    engine.dragStart(a.index);
+    engine.dragMove(s.x + 40, s.y + 30);
+    const dx = engine.position("a")!.x - before[0].x;
+    const dy = engine.position("a")!.y - before[0].y;
+    expect(dx).toBeGreaterThan(0);
+    expect(Math.abs(engine.position("b")!.x - before[1].x - dx)).toBeLessThan(1e-6);
+    expect(Math.abs(engine.position("b")!.y - before[1].y - dy)).toBeLessThan(1e-6);
+    expect(engine.position("c")).toEqual(before[2]);
+    engine.dragEnd();
+    expect(engine.isPinned("a")).toBe(false);
+    expect(engine.isPinned("b")).toBe(false);
+    // A node outside the selection drags alone.
+    const c = engine.engineNode("c")!;
+    const sc = engine.graphToScreen(c.x, c.y);
+    const bBefore = { ...engine.position("b")! };
+    engine.dragStart(c.index);
+    engine.dragMove(sc.x + 20, sc.y);
+    expect(engine.position("b")).toEqual(bBefore);
+    engine.dragEnd();
+  });
+
+  test("with several nodes selected, the focus is all of them and their neighbors", () => {
+    const engine = sized();
+    engine.setData(chain(6));
+    engine.selectNodes(["n0", "n4"]);
+    const f = engine.focus()!;
+    const ids = [...f.nodes].map((i) => engine.nodes[i].id).sort();
+    expect(ids).toEqual(["n0", "n1", "n3", "n4", "n5"]);
+    expect(f.edges.size).toBe(3);
+  });
+
+  test("fitNodes fits only the nodes given", () => {
+    const engine = sized({ layout: "grid" });
+    engine.setData({ nodes: Array.from({ length: 400 }, (_, i) => ({ id: `n${i}` })), edges: [] });
+    engine.fit(false);
+    const k = engine.k;
+    engine.fitNodes(["n0", "n1"], false);
+    expect(engine.k).toBeGreaterThan(k);
+    expect(engine.autoFit).toBe(false);
+    for (const id of ["n0", "n1"]) {
+      const p = engine.position(id)!;
+      const s = engine.graphToScreen(p.x, p.y);
+      expect(s.x > 0 && s.x < 800 && s.y > 0 && s.y < 600).toBe(true);
+    }
+  });
+
   test("mergeGraphData merges by id", () => {
     const merged = mergeGraphData(
       { nodes: [{ id: "a", caption: "A" }], edges: [{ id: "e", from: "a", to: "a" }] },

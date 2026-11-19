@@ -1,0 +1,20 @@
+[package]
+name = "nsh-graph-native"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "nsh-graph's force layout in Rust, for NSH apps (`nsh-graph/native`)"
+publish = false
+
+# Built on its own: an app lists this directory in its nsh.json `"rust"`.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nsh-core = "0.6.0"
+
+[profile.dev]
+# The layout runs every frame: even debug builds need it optimized.
+opt-level = 2

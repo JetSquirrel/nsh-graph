@@ -12,7 +12,9 @@ model) and on [Neo4j NVL](https://neo4j.com/docs/nvl/current/) (data model, cont
   hierarchical (layered, cycle-safe, four directions), circular and grid. Switching layouts animates the nodes.
 - **Interaction**: drag the background (or scroll with two fingers on a touchpad) to pan; drag a node to move it,
   with optional sticky pinning. The mouse wheel, Ctrl+scroll, a trackpad pinch or a two-finger touch pinch zooms.
-  Tap to select; double-tap or Enter to activate; right-click for a context menu.
+  Tap to select; Shift-, Ctrl- or ⌘-click adds or removes a node, Shift-drag on the background draws a selection
+  box, and dragging one of several selected nodes moves them all. Double-tap or Enter activates; right-click opens a
+  context menu.
   Hovering highlights neighbors. Arrow keys walk the graph; `+`/`-`/`0` zoom and fit; `p` pins; Esc clears.
 - **Drawing**: edges batched by state, with arrows; curved parallel edges and self loops; edge captions; community
   hulls; degree-based node sizing; captions inside or under nodes, with collision culling in `auto` mode.
@@ -101,10 +103,11 @@ interface GraphEdge<T> { id?: string; from: string; to: string; caption?: string
 | `colorBy` | `"category"` | or `"group"`. |
 | `labelMode` | `"auto"` | `"auto"`, `"always"` or `"never"`. |
 | `arrows` / `edgeLabels` / `groupHulls` / `stickyDrag` | `true` / `false` / `false` / `false` | |
+| `multiSelect` | `true` | Shift/Ctrl/⌘-click, Shift-drag box, Shift + arrows, Ctrl/⌘ + A. `false`: one item at a time. |
 | `minZoom` / `maxZoom` | `0.05` / `6` | |
 | `colors` | theme | `background`, `text`, `surface`, `edge`, `edgeHighlight`, `edgeText`, `selection`, `palette`, `other`. |
 | `fontFamily` | `"system-ui"` | |
-| `onSelectionChange(selection)` | | `{ kind: "node", node }`, `{ kind: "edge", edge }` or `null`. |
+| `onSelectionChange(selection)` | | `{ kind: "node", node, nodes }` (`node` is the one selected last, `nodes` all of them), `{ kind: "edge", edge }` or `null`. |
 | `onNodeActivate(node)` | | Double-tap, double-click or Enter. |
 | `onHover(target)` | | Desktops and the web. |
 | `onContextMenu(target, { position, pagePosition })` | | Open a menu with `Menu.popup(items, e.pagePosition)` from `nsh/desktop`. |
@@ -117,6 +120,7 @@ const graph = createGraphController();
 graph.selection();  graph.zoom();  graph.legend();  graph.settling();   // reactive
 graph.fit();  graph.zoomIn();  graph.zoomOut();  graph.setZoom(1.5);  graph.centerOn(id);
 graph.select(id, { center: true });  graph.selectEdge(id);  graph.clearSelection();
+graph.selectNodes(ids, "add");  graph.selectAll();  graph.selectedIds();  graph.isSelected(id);  graph.fitSelection();
 graph.relayout();  graph.setPinned(id, true);  graph.isPinned(id);  graph.unpinAll();
 graph.node(id);  graph.position(id);  graph.degree(id);  graph.neighbors(id);  graph.edgesOf(id);
 const png = await graph.toImage({ scale: 2 });   // Blob
@@ -173,9 +177,53 @@ Measured on QuickJS (`nsh test example`, `datasets.test.ts`), JS time per frame:
 | Star, 301 / 300 | 18 ms | 13 ms | 5.8 s |
 | Scale-free, 1500 / 2997 | 80 ms | 30 ms | 22 s |
 
-A live force layout stays smooth up to a few hundred nodes. Larger graphs work, but they settle slowly and
-frames drop while they do. For those, use `hierarchical`, `circular` or `grid` (computed once, no ticks), or
-give nodes starting positions. A Rust simulation is on the roadmap.
+In TypeScript, a live force layout stays smooth up to a few hundred nodes. Larger graphs work, but they
+settle slowly and frames drop while they do. For those, use the Rust backend below, or `hierarchical`,
+`circular` or `grid` (computed once, no ticks), or give nodes starting positions.
+
+### Rust backend
+
+`native/` is an optional Rust crate, `nsh-graph/native`, after gpui-graph's Rust layout and batched painting.
+It moves the two hot paths out of QuickJS:
+
+- **`ForceLayout`**: the force simulation, the same forces step for step (the layouts match), at the
+  configured Barnes–Hut accuracy at every size.
+- **`GraphPainter`**: edges and nodes traced as SVG path data, one path per state and color, that the canvas
+  draws with a handful of `Path2D` calls instead of several calls per edge and node. Arrows, captions,
+  rings and hulls are unchanged.
+
+To use it, list the crate in the app's nsh.json and register it once at startup:
+
+```json
+{ "rust": ["../nsh-graph/native"] }
+```
+
+```ts
+import * as native from "nsh-graph/native";
+import { setNativeBackend, type NativeBackend } from "nsh-graph";
+setNativeBackend(native as unknown as NativeBackend);
+```
+
+Views mounted after that use it; without it nothing changes. NSH builds app crates unoptimized in
+`nsh run` and `nsh test`, about ten times slower, so also add the crate to the app's `.cargo/config.toml`
+(this repository's covers `perf/` and `example/`):
+
+```toml
+[profile.dev.package.nsh-graph-native]
+opt-level = 3
+```
+
+Measured in NSH's headless runtime (`nsh test perf`), TypeScript → Rust:
+
+| Graph | Tick | Settles in | Draw |
+|---|---|---|---|
+| Flare imports, 220 / 764 | 15 → 0.6 ms | 5.0 → 0.15 s | |
+| Star, 301 / 300 | 22 → 0.6 ms | 5.7 → 0.17 s | |
+| Scale-free, 1500 / 2997 | 85 → 4.6 ms | 40 → 1.9 s | 20 → 12 ms |
+| Scale-free, 5000 / 9997 | 286 → 15 ms | (minutes) → 4.7 s | 70 → 41 ms |
+
+Edge-length spread and crowding are the same both ways. Most of what is left of a Rust tick is copying
+positions between JS objects and Rust; `nsh run perf` shows 1500 to 10000 nodes either way.
 
 ## Compared with other libraries
 
@@ -206,9 +254,9 @@ nsh test example/input.test.tsx --target windows   # input on a real host (or ma
 ## Roadmap
 
 - Collapsing communities into super nodes (as gpui-graph does)
-- Box / lasso multi-selection
+- Lasso selection (box selection is in)
 - Edge bundling and level-of-detail rendering for graphs of several thousand nodes
-- A Rust port of the simulation for very large graphs, exported to TSX through `#[native_module]`
+- Keep positions in Rust between ticks, so a native tick no longer copies every node through JS
 
 ## License
 

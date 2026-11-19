@@ -21,8 +21,9 @@ export interface Ctx2D {
   bezierCurveTo(c1x: number, c1y: number, c2x: number, c2y: number, x: number, y: number): void;
   arc(x: number, y: number, r: number, a0: number, a1: number, ccw?: boolean): void;
   closePath(): void;
-  fill(): void;
-  stroke(): void;
+  /** `path`: a `Path2D` (only passed when `renderGraph` is given `paths`). */
+  fill(path?: any): void;
+  stroke(path?: any): void;
   fillRect(x: number, y: number, w: number, h: number): void;
   fillText(text: string, x: number, y: number, maxWidth?: number): void;
   strokeText(text: string, x: number, y: number, maxWidth?: number): void;
@@ -83,8 +84,18 @@ export function strokeWidth(width: number | undefined): number {
   return width !== undefined && Number.isFinite(width) && width > 0 ? width : 1.5;
 }
 
-export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, width: number, height: number) {
+/** How `renderGraph` builds a path from SVG path data: `(d) => new Path2D(d)` with NSH's `Path2D`. */
+export interface RenderPaths {
+  path: (d: string) => unknown;
+}
+
+/**
+ * Draws the graph. With `paths` and an engine that has the Rust painter (`setNativeBackend`), edges and
+ * nodes are traced in Rust and drawn as a few paths; without, they are traced here, call by call.
+ */
+export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, width: number, height: number, paths?: RenderPaths) {
   const { nodes, edges, k, tx, ty, options } = engine;
+  const native = engine.painter && paths ? { painter: engine.painter, path: paths.path } : null;
   if (theme.background) {
     cx.fillStyle = theme.background;
     cx.fillRect(0, 0, width, height);
@@ -95,6 +106,12 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   const focus = engine.focus();
   const selectedId = engine.selected;
   const selNode = selectedId?.kind === "node" ? engine.engineNode(selectedId.id)?.index ?? -1 : -1;
+  // Every selected node (the primary one among them).
+  const selNodes = new Set<number>();
+  for (const id of engine.selectedNodes) {
+    const i = engine.engineNode(id)?.index;
+    if (i !== undefined) selNodes.add(i);
+  }
   const hoverNode = engine.hovered?.kind === "node" ? engine.hovered.index : -1;
   const hoverEdge = engine.hovered?.kind === "edge" ? engine.hovered.index : -1;
   const selEdge = selectedId?.kind === "edge" ? edges.findIndex((e) => e.id === selectedId.id) : -1;
@@ -178,15 +195,34 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   };
 
   const arrows = options.arrows && arrowLen(1.5) * k >= 3.5;
+  const custom = (i: number) => {
+    const e = edges[i].edge;
+    return !!e.color || strokeWidth(e.width) !== 1.5;
+  };
+  // With the Rust painter, the default-look edges of each pass come back as two SVG paths.
+  let traced: string[] | null = null;
+  if (native) {
+    const pos = new Float64Array(nodes.length * 3);
+    for (let i = 0; i < nodes.length; i++) {
+      pos[i * 3] = nodes[i].x;
+      pos[i * 3 + 1] = nodes[i].y;
+      pos[i * 3 + 2] = nodes[i].r;
+    }
+    native.painter.setNodes(new Uint8Array(pos.buffer));
+    const states = new Uint8Array(edges.length);
+    for (let i = 0; i < edges.length; i++) states[i] = custom(i) ? 255 : state(i);
+    traced = native.painter.traceEdges(states, [vx0, vy0, vx1, vy1, arrows ? 1 : 0, arrowLen(Math.max(1.5, 0.75 * px))]);
+  }
   for (const pass of [0, 1, 2] as const) {
     const color = pass === 2 ? theme.edgeHighlight : theme.edge;
     cx.globalAlpha = pass === 0 ? DIM : 1;
     // Edges with the default look share one path; custom ones are drawn on their own.
     const batch: number[] = [];
     for (let i = 0; i < edges.length; i++) {
+      if (traced && !custom(i)) continue;
       if (state(i) !== pass || !edgeVisible(i)) continue;
       const e = edges[i].edge;
-      if (e.color || strokeWidth(e.width) !== 1.5) {
+      if (custom(i)) {
         cx.beginPath();
         tracePath(shape(i), i);
         cx.strokeStyle = pass === 2 && !e.color ? color : (e.color ?? color);
@@ -201,6 +237,20 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
       } else {
         batch.push(i);
       }
+    }
+    if (traced && native) {
+      const lines = traced[pass * 2];
+      const heads = traced[pass * 2 + 1];
+      if (lines) {
+        cx.strokeStyle = color;
+        cx.lineWidth = Math.max(1.5, 0.75 * px) * (pass === 2 ? 1.4 : 1);
+        cx.stroke(native.path(lines));
+      }
+      if (arrows && heads) {
+        cx.fillStyle = color;
+        cx.fill(native.path(heads));
+      }
+      continue;
     }
     if (batch.length === 0) continue;
     cx.beginPath();
@@ -227,7 +277,28 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
     if (batch) batch.push(i);
     else batches.set(key, [i]);
   }
-  for (const [key, batch] of [...batches.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+  const sorted = [...batches.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  if (native) {
+    // The Rust painter traces each batch's circles into one path.
+    const keys = new Uint32Array(nodes.length).fill(0xffffffff);
+    sorted.forEach(([, batch], b) => {
+      for (const i of batch) keys[i] = b;
+    });
+    const circles = native.painter.traceNodes(new Uint8Array(keys.buffer), sorted.length, [vx0, vy0, vx1, vy1]);
+    sorted.forEach(([key, batch], b) => {
+      if (!circles[b]) return;
+      cx.globalAlpha = key[0] === "0" ? DIM + 0.1 : 1;
+      const path = native.path(circles[b]);
+      cx.fillStyle = key.slice(1);
+      cx.fill(path);
+      if (batch.some((i) => nodes[i].r * k >= 5)) {
+        cx.strokeStyle = theme.surface;
+        cx.lineWidth = 1.5 * px;
+        cx.stroke(path);
+      }
+    });
+  }
+  for (const [key, batch] of native ? [] : sorted) {
     cx.globalAlpha = key[0] === "0" ? DIM + 0.1 : 1;
     cx.beginPath();
     let rings = false;
@@ -249,9 +320,9 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   cx.globalAlpha = 1;
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
-    if (i !== selNode && i !== hoverNode && n.fx === null) continue;
+    if (!selNodes.has(i) && i !== hoverNode && n.fx === null) continue;
     if (!visible(n.x, n.y)) continue;
-    if (i === selNode) {
+    if (selNodes.has(i)) {
       cx.beginPath();
       cx.arc(n.x, n.y, n.r + 3.5 * px, 0, Math.PI * 2);
       cx.strokeStyle = theme.selection;
@@ -302,7 +373,7 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   // In "auto", a caption or edge label that would cover a node or another label is left out. Node captions
   // go first (emphasized nodes, then the bigger, busier ones), edge labels after them.
   const auto = options.labelMode === "auto";
-  const emphasized = (i: number) => i === selNode || i === hoverNode || (focus !== null && focus.nodes.has(i));
+  const emphasized = (i: number) => selNodes.has(i) || i === hoverNode || (focus !== null && focus.nodes.has(i));
   const onScreen: number[] = [];
   const order: number[] = [];
   const priority = new Map<number, number>();
@@ -403,6 +474,26 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
       haloText(cx, text, 0, 0, st === 2 ? theme.text : theme.edgeText, theme.surface);
       cx.restore();
     }
+  }
+
+  // ---- The selection box being dragged, over everything.
+  const m = engine.marquee;
+  if (m) {
+    const x = Math.min(m.x0, m.x1);
+    const y = Math.min(m.y0, m.y1);
+    const w = Math.abs(m.x1 - m.x0);
+    const h = Math.abs(m.y1 - m.y0);
+    cx.fillStyle = withAlpha(theme.selection, 0.1);
+    cx.fillRect(x, y, w, h);
+    cx.strokeStyle = withAlpha(theme.selection, 0.8);
+    cx.lineWidth = 1;
+    cx.beginPath();
+    cx.moveTo(x + 0.5, y + 0.5);
+    cx.lineTo(x + w + 0.5, y + 0.5);
+    cx.lineTo(x + w + 0.5, y + h + 0.5);
+    cx.lineTo(x + 0.5, y + h + 0.5);
+    cx.closePath();
+    cx.stroke();
   }
 }
 

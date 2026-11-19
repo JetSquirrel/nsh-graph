@@ -13,7 +13,7 @@
 | Force layout | Barnes–Hut, collision, gravity, group clustering | Barnes–Hut, collision, gravity, group clustering | forceDirected, d3Force | cose, fcose / cola (ext.) | ForceAtlas2 (web worker) | force, d3-force, ForceAtlas2, Fruchterman (some WASM / GPU) | Barnes–Hut, ForceAtlas2-based, repulsion | force | yes (the reference) |
 | Other layouts | hierarchical, circular, grid | none | hierarchical, grid, free | breadthfirst, circle, grid, concentric; dagre, ELK (ext.) | circular, random, noverlap | dagre, circular, concentric, radial, grid, MDS, mindmap, dendrogram… | hierarchical | circular | none |
 | Groups | hulls, clustering force | hulls, **collapse to super nodes** | none built in | **compound nodes** | none built in | **combos** (collapsible) | clustering | categories | none |
-| Selection | single, keyboard | single, keyboard | single, box, lasso | multi, box | via events | multi, box, lasso | multi | single | none |
+| Selection | multi, box, keyboard | single, keyboard | single, box, lasso | multi, box | via events | multi, box, lasso | multi | single | none |
 | Node look | circles, color, size, caption | circles, caption | circles, icons, captions | shapes, images, CSS-like style | circles, images (programs) | shapes, images, HTML / React nodes, 3D (ext.) | shapes, images | symbols | none |
 | Graph algorithms | none (neighbors, degree) | none | none | **many** (paths, centrality, clustering) | graphology std-lib | some | none | none | none |
 | Accessibility | keyboard walk, screen-reader label, reduced motion, validated palette | keyboard, focus rings, reduced motion | keyboard handlers | none built in | none built in | some keyboard | keyboard (opt-in) | ARIA description | n/a |
@@ -86,7 +86,7 @@ What it shows:
 **Gaps against the browser libraries.**
 - No GPU renderer, so it doesn't reach WebGL scale (sigma, NVL, G6).
 - No collapsible groups (gpui-graph, G6 combos, Cytoscape compound nodes).
-- No box or lasso multi-selection.
+- No lasso selection (Shift-click and box selection are in).
 - No node shapes, icons or images.
 - No graph algorithms (Cytoscape, graphology).
 - Fewer layouts: no radial, concentric or ELK / dagre-grade layered layout.

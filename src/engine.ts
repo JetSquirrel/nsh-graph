@@ -4,6 +4,7 @@
  * `GraphView` connects it to a canvas and input; it can also be driven and tested on its own.
  */
 import { edgeDistance, edgeShape, type EdgeShape, type Pt } from "./geometry";
+import { nativeBackend, type NativeGraphPainter } from "./native";
 import { circularLayout, gridLayout, hierarchicalLayout, type LayoutNode, type Positions } from "./layouts";
 import { OTHER, SlotAssigner, naturalCompare } from "./palette";
 import { strokeWidth } from "./render";
@@ -94,6 +95,8 @@ interface Viewport {
   ty: number;
 }
 
+/** How long the first load may tick before its first frame, in ms. */
+const WARM_UP_MS = 60;
 const PARALLEL_SPACING = 22;
 const TWEEN_MS = 450;
 const VIEW_TWEEN_MS = 300;
@@ -116,8 +119,15 @@ export class GraphEngine {
 
   /** The hovered target (pointer over it), or null. */
   hovered: { kind: "node"; index: number } | { kind: "edge"; index: number } | null = null;
-  /** The selected node or edge, by id. */
+  /**
+   * The primary selection, by id: the edge selected, or the node selected last. With several nodes
+   * selected, `selectedNodes` holds them all.
+   */
   selected: { kind: "node" | "edge"; id: string } | null = null;
+  /** The selected nodes' ids, in the order they were selected: the primary one is last. Empty for an edge. */
+  selectedNodes: ReadonlySet<string> = new Set();
+  /** The selection box being dragged, in screen points, or null. */
+  marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
   /** The node being dragged, or -1. */
   dragging = -1;
 
@@ -138,6 +148,10 @@ export class GraphEngine {
   private shapes: EdgeShape[] = [];
   private shapeStamp: number[] = [];
   private dragWasPinned = false;
+  /** The other selected nodes that move with the dragged one: index, offset, and whether it was pinned. */
+  private dragGroup: { index: number; dx: number; dy: number; wasPinned: boolean }[] = [];
+  /** The selection a box drag started from (it adds to it), or null for a fresh one. */
+  private marqueeBase: string[] | null = null;
   /** Layout ticks wait until then (ms, `performance.now`) while the user pans or zooms. */
   private layoutHold = 0;
   /** What the last layout tick cost, in ms. */
@@ -145,9 +159,14 @@ export class GraphEngine {
   /** When the last reduced-motion progress was shown (ms). */
   private lastQuietDraw = -Infinity;
 
+  /** Traces edges and nodes into batched paths in Rust, when `setNativeBackend` registered a backend. */
+  readonly painter: NativeGraphPainter | null;
+
   constructor(options: Partial<EngineOptions> = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
     this.sim = new ForceSimulation(this.options.force);
+    const native = nativeBackend();
+    this.painter = native?.GraphPainter ? new native.GraphPainter() : null;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -261,11 +280,14 @@ export class GraphEngine {
 
     // Keep hover and selection when their target is still there.
     this.hovered = null;
-    if (this.selected) {
-      const gone = this.selected.kind === "node" ? !byId.has(this.selected.id) : !edgeById.has(this.selected.id);
-      if (gone) this.setSelected(null);
+    if (this.selected?.kind === "edge") {
+      if (!edgeById.has(this.selected.id)) this.setSelected(null);
+    } else if (this.selected) {
+      const kept = [...this.selectedNodes].filter((id) => byId.has(id));
+      if (kept.length !== this.selectedNodes.size) this.commitNodes(kept);
     }
     if (this.dragging >= 0) this.dragging = -1;
+    this.dragGroup = [];
 
     this.prepareColors();
     const first = !this.loaded;
@@ -273,6 +295,13 @@ export class GraphEngine {
     if (first || added > 0 || removed > 0) this.runLayout(first ? 1 : added > 0 ? 0.6 : 0.3, first);
     this.geometryVersion++;
     this.dirty = true;
+    if (this.painter) {
+      const packed = new Float64Array(edges.length * 5);
+      edges.forEach((e, i) => {
+        packed.set([e.source, e.target, e.bend, e.self ? 1 : 0, e.loopIndex], i * 5);
+      });
+      this.painter.setEdges(new Uint8Array(packed.buffer));
+    }
   }
 
   /** Gives palette slots to the categories (or groups) shown, biggest first. */
@@ -407,8 +436,11 @@ export class GraphEngine {
 
   /** On the first load, settle the roughest part of the layout before the first frame. */
   private warmUp() {
+    // A TypeScript tick costs about 0.055 ms per node on QuickJS: past ~1000 nodes even the first one would
+    // overrun the budget and hold the first frame (a 5000-node tick takes a quarter of a second or more).
+    if (!this.sim.isNative && this.nodes.length * 0.055 > WARM_UP_MS) return;
     const start = now();
-    while (this.sim.alpha > 0.35 && now() - start < 60) this.sim.tick();
+    while (this.sim.alpha > 0.35 && now() - start < WARM_UP_MS) this.sim.tick();
     this.geometryVersion++;
   }
 
@@ -579,8 +611,24 @@ export class GraphEngine {
     this.fitTo(this.nodes.map((n) => ({ x: n.x, y: n.y })), animated);
   }
 
-  private fitTo(points: Positions, animated: boolean) {
-    const v = this.fitViewport(points);
+  /** Fits these nodes in view (the rest of the graph may fall outside); the view stops following the layout. */
+  fitNodes(ids: Iterable<string>, animated = true) {
+    const picked: EngineNode[] = [];
+    for (const id of ids) {
+      const n = this.byId.get(id);
+      if (n) picked.push(n);
+    }
+    if (picked.length === 0) return;
+    this.autoFit = false;
+    this.fitTo(
+      picked.map((n) => ({ x: n.x, y: n.y })),
+      animated,
+      picked.map((n) => n.r),
+    );
+  }
+
+  private fitTo(points: Positions, animated: boolean, radii?: number[]) {
+    const v = this.fitViewport(points, radii);
     if (!v) return;
     if (animated && !this.options.reduceMotion) this.animateView(v);
     else {
@@ -592,11 +640,11 @@ export class GraphEngine {
     }
   }
 
-  private fitViewport(points: Positions): Viewport | null {
+  private fitViewport(points: Positions, radii?: number[]): Viewport | null {
     if (this.width <= 0 || this.height <= 0 || points.length === 0) return null;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     points.forEach((p, i) => {
-      const r = this.nodes[i]?.r ?? 0;
+      const r = (radii ? radii[i] : this.nodes[i]?.r) ?? 0;
       if (Number.isNaN(p.x)) return;
       x0 = Math.min(x0, p.x - r);
       y0 = Math.min(y0, p.y - r);
@@ -758,13 +806,50 @@ export class GraphEngine {
       : { kind: "edge", edge: this.edges[h.index].edge };
   }
 
-  /** Selects a node or edge by id (null clears). */
+  /** Selects one node or edge by id, replacing the selection (null clears). */
   setSelected(sel: { kind: "node" | "edge"; id: string } | null) {
-    if (sel && sel.kind === "node" && !this.byId.has(sel.id)) sel = null;
-    if (sel && sel.kind === "edge" && !this.edgeById.has(sel.id)) sel = null;
+    if (sel && sel.kind === "node") return this.commitNodes(this.byId.has(sel.id) ? [sel.id] : []);
+    if (sel && !this.edgeById.has(sel.id)) sel = null;
     const a = this.selected;
-    if (a === sel || (a && sel && a.kind === sel.kind && a.id === sel.id)) return;
+    const same = a === sel || (a !== null && sel !== null && a.kind === sel.kind && a.id === sel.id);
+    if (same && this.selectedNodes.size === 0) return;
     this.selected = sel;
+    this.selectedNodes = new Set();
+    this.changedSelection();
+  }
+
+  /**
+   * Changes which nodes are selected: `replace` selects just `ids`, `add` and `remove` change the
+   * selection by them, and `toggle` flips each. Ids not in the graph are skipped. A node added becomes
+   * the primary one; a selected edge is let go.
+   */
+  selectNodes(ids: Iterable<string>, mode: "replace" | "add" | "remove" | "toggle" = "replace") {
+    const next = new Set(mode === "replace" ? [] : this.selectedNodes);
+    for (const id of ids) {
+      if (!this.byId.has(id)) continue;
+      const had = next.delete(id);
+      if (mode === "remove" || (mode === "toggle" && had)) continue;
+      next.add(id); // last: the primary one
+    }
+    this.commitNodes([...next]);
+  }
+
+  /** Whether the node is selected (the primary one or another). */
+  isSelected(id: string): boolean {
+    return this.selectedNodes.has(id);
+  }
+
+  /** Makes `ids` the selected nodes, the last one primary, and reports it when anything changed. */
+  private commitNodes(ids: string[]) {
+    const cur = [...this.selectedNodes];
+    const same = this.selected?.kind !== "edge" && cur.length === ids.length && cur.every((id, i) => id === ids[i]);
+    if (same) return;
+    this.selectedNodes = new Set(ids);
+    this.selected = ids.length > 0 ? { kind: "node", id: ids[ids.length - 1] } : null;
+    this.changedSelection();
+  }
+
+  private changedSelection() {
     this.dirty = true;
     this.onEvent?.({ type: "selection", selection: this.selection() });
   }
@@ -774,7 +859,13 @@ export class GraphEngine {
     if (!s) return null;
     if (s.kind === "node") {
       const n = this.byId.get(s.id);
-      return n ? { kind: "node", node: n.node } : null;
+      if (!n) return null;
+      const nodes: GraphNode[] = [];
+      for (const id of this.selectedNodes) {
+        const m = this.byId.get(id);
+        if (m) nodes.push(m.node);
+      }
+      return { kind: "node", node: n.node, nodes };
     }
     const e = this.edgeById.get(s.id);
     return e ? { kind: "edge", edge: e.edge } : null;
@@ -789,6 +880,41 @@ export class GraphEngine {
     return this.hitTest(sx, sy, slop);
   }
 
+  /** The ids of the nodes whose centers are inside a screen rectangle (its corners in any order). */
+  nodesInRect(x0: number, y0: number, x1: number, y1: number): string[] {
+    const a = this.screenToGraph(Math.min(x0, x1), Math.min(y0, y1));
+    const b = this.screenToGraph(Math.max(x0, x1), Math.max(y0, y1));
+    const out: string[] = [];
+    for (const n of this.nodes) if (n.x >= a.x && n.x <= b.x && n.y >= a.y && n.y <= b.y) out.push(n.id);
+    return out;
+  }
+
+  /** Starts a selection box at (sx, sy); with `add` it adds to what is selected, else it starts over. */
+  marqueeStart(sx: number, sy: number, add: boolean) {
+    this.marquee = { x0: sx, y0: sy, x1: sx, y1: sy };
+    this.marqueeBase = add ? [...this.selectedNodes] : [];
+    if (!add) this.setSelected(null);
+    this.dirty = true;
+  }
+
+  /** Stretches the selection box to (sx, sy). The nodes inside it are selected as it moves. */
+  marqueeMove(sx: number, sy: number) {
+    const m = this.marquee;
+    if (!m) return;
+    m.x1 = sx;
+    m.y1 = sy;
+    const base = this.marqueeBase ?? [];
+    const seen = new Set(base);
+    this.commitNodes([...base, ...this.nodesInRect(m.x0, m.y0, m.x1, m.y1).filter((id) => !seen.has(id))]);
+    this.dirty = true;
+  }
+
+  marqueeEnd() {
+    this.marquee = null;
+    this.marqueeBase = null;
+    this.dirty = true;
+  }
+
   /**
    * What to emphasize: the hovered node (else the selected one) with its neighbors and edges, or an
    * edge with its two ends. Null when nothing is in focus.
@@ -801,6 +927,21 @@ export class GraphEngine {
           ? { kind: "node" as const, index: this.byId.get(this.selected.id)?.index ?? -1 }
           : { kind: "edge" as const, index: this.edges.indexOf(this.edgeById.get(this.selected.id)!) }
         : null);
+    if (!this.hovered && this.selectedNodes.size > 1) {
+      // Several nodes selected: all of them, their neighbors and their edges.
+      const sel = new Set<number>();
+      for (const id of this.selectedNodes) {
+        const n = this.byId.get(id);
+        if (n) sel.add(n.index);
+      }
+      const nodes = new Set(sel);
+      for (const i of sel) for (const j of this.nodes[i].neighbors) nodes.add(j);
+      const edges = new Set<number>();
+      this.edges.forEach((e, i) => {
+        if (sel.has(e.source) || sel.has(e.target)) edges.add(i);
+      });
+      return { nodes, edges };
+    }
     if (!f || f.index < 0) return null;
     if (f.kind === "node") {
       const nodes = new Set(this.nodes[f.index].neighbors);
@@ -850,6 +991,7 @@ export class GraphEngine {
   // Dragging and pinning
 
   /** Starts dragging node `index`. */
+  /** Starts dragging a node. When it is one of several selected nodes, they all move with it. */
   dragStart(index: number) {
     const n = this.nodes[index];
     if (!n) return;
@@ -857,6 +999,16 @@ export class GraphEngine {
     this.dragWasPinned = n.fx !== null;
     n.fx = n.x;
     n.fy = n.y;
+    this.dragGroup = [];
+    if (this.selectedNodes.size > 1 && this.selectedNodes.has(n.id)) {
+      for (const id of this.selectedNodes) {
+        const m = this.byId.get(id);
+        if (!m || m === n) continue;
+        this.dragGroup.push({ index: m.index, dx: m.x - n.x, dy: m.y - n.y, wasPinned: m.fx !== null });
+        m.fx = m.x;
+        m.fy = m.y;
+      }
+    }
     if (this.options.layout === "force") {
       this.sim.alphaTarget = 0.3;
       this.sim.reheat(0.3);
@@ -871,6 +1023,12 @@ export class GraphEngine {
     const p = this.screenToGraph(sx, sy);
     n.fx = n.x = p.x;
     n.fy = n.y = p.y;
+    for (const g of this.dragGroup) {
+      const m = this.nodes[g.index];
+      if (!m) continue;
+      m.fx = m.x = p.x + g.dx;
+      m.fy = m.y = p.y + g.dy;
+    }
     this.geometryVersion++;
     this.dirty = true;
   }
@@ -879,9 +1037,15 @@ export class GraphEngine {
     const n = this.nodes[this.dragging];
     this.dragging = -1;
     this.sim.alphaTarget = 0;
+    const group = this.dragGroup;
+    this.dragGroup = [];
     if (!n) return;
-    if (!this.options.stickyDrag && !this.dragWasPinned) {
-      n.fx = n.fy = null;
+    if (!this.options.stickyDrag) {
+      if (!this.dragWasPinned) n.fx = n.fy = null;
+      for (const g of group) {
+        const m = this.nodes[g.index];
+        if (m && !g.wasPinned) m.fx = m.fy = null;
+      }
     }
     this.dirty = true;
   }

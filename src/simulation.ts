@@ -5,6 +5,7 @@
  *
  * Pure TypeScript with no NSH imports: it runs (and is tested) anywhere.
  */
+import { nativeBackend, type NativeBackend, type NativeForceLayout } from "./native";
 import { Collider, ManyBody } from "./quadtree";
 import type { ForceConfig } from "./types";
 
@@ -66,15 +67,37 @@ export class ForceSimulation {
   private jiggler = () => this.jiggle();
   private linkStrength: number[] = [];
   private linkBias: number[] = [];
+  /** The Rust layout the ticks run on, when `setNativeBackend` registered one; null runs them here. */
+  private native: NativeForceLayout | null = null;
+  private state = new Float64Array(0);
 
-  constructor(config: Partial<ForceConfig> = {}) {
+  /** `native` overrides the backend `setNativeBackend` registered (null: TypeScript). */
+  constructor(config: Partial<ForceConfig> = {}, native: NativeBackend | null = nativeBackend()) {
     this.config = { ...DEFAULT_FORCE, ...config };
+    if (native) {
+      this.native = new native.ForceLayout();
+      this.pushConfig();
+    }
+  }
+
+  /** Whether the ticks run in Rust. */
+  get isNative(): boolean {
+    return this.native !== null;
+  }
+
+  private pushConfig() {
+    const c = this.config;
+    this.native?.setConfig([
+      c.linkDistance, c.charge, c.theta, c.chargeDistanceMax, c.collidePadding,
+      c.gravity, c.groupStrength, c.velocityDecay, c.alphaDecay, c.alphaMin,
+    ]);
   }
 
   /** Replaces the nodes and links. Node objects are used as given, so their positions carry over. */
   setGraph(nodes: SimNode[], links: SimLink[]) {
     this.nodes = nodes;
     this.links = links;
+    if (this.native) this.pushGraph();
     const count = new Array<number>(nodes.length).fill(0);
     for (const l of links) {
       count[l.source]++;
@@ -86,6 +109,63 @@ export class ForceSimulation {
 
   setConfig(config: Partial<ForceConfig>) {
     this.config = { ...this.config, ...config };
+    this.pushConfig();
+  }
+
+  /** Hands the links and groups to the Rust layout (groups as indices). */
+  private pushGraph() {
+    const nodes = this.nodes;
+    const links = new Uint32Array(this.links.length * 2);
+    this.links.forEach((l, i) => {
+      links[i * 2] = l.source;
+      links[i * 2 + 1] = l.target;
+    });
+    const groups = new Int32Array(nodes.length);
+    const index = new Map<string, number>();
+    nodes.forEach((n, i) => {
+      if (n.group === null) return (groups[i] = -1);
+      let g = index.get(n.group);
+      if (g === undefined) index.set(n.group, (g = index.size));
+      groups[i] = g;
+    });
+    this.native!.setGraph(nodes.length, new Uint8Array(links.buffer), new Uint8Array(groups.buffer));
+  }
+
+  /** `iterations` ticks in Rust: the nodes' state goes over in one buffer and comes back in another. */
+  private tickNative(iterations: number) {
+    const nodes = this.nodes;
+    const n = nodes.length;
+    if (this.state.length !== n * 7) this.state = new Float64Array(n * 7);
+    const s = this.state;
+    for (let i = 0; i < n; i++) {
+      const node = nodes[i];
+      const b = i * 7;
+      s[b] = node.x;
+      s[b + 1] = node.y;
+      s[b + 2] = node.vx;
+      s[b + 3] = node.vy;
+      s[b + 4] = node.fx ?? NaN;
+      s[b + 5] = node.fy ?? NaN;
+      s[b + 6] = node.r;
+    }
+    const bytes = this.native!.tick(new Uint8Array(s.buffer), iterations, this.alpha, this.alphaTarget);
+    if (bytes.byteLength < (n * 6 + 1) * 8) throw new Error(`ForceLayout.tick returned ${bytes.byteLength} bytes for ${n} nodes`);
+    // A Float64Array needs its offset aligned to 8: copy when it is not.
+    const aligned = bytes.byteOffset % 8 === 0 ? bytes : bytes.slice();
+    const out = new Float64Array(aligned.buffer, aligned.byteOffset, n * 6 + 1);
+    for (let i = 0; i < n; i++) {
+      const node = nodes[i];
+      const b = i * 6;
+      node.x = out[b];
+      node.y = out[b + 1];
+      node.vx = out[b + 2];
+      node.vy = out[b + 3];
+      if (node.fx !== null) {
+        node.fx = out[b + 4];
+        node.fy = out[b + 5];
+      }
+    }
+    this.alpha = out[n * 6];
   }
 
   /** Whether another tick would still move things. */
@@ -105,6 +185,7 @@ export class ForceSimulation {
 
   /** Advances `iterations` ticks. */
   tick(iterations = 1) {
+    if (this.native) return this.tickNative(iterations);
     const c = this.config;
     for (let k = 0; k < iterations; k++) {
       this.alpha += (this.alphaTarget - this.alpha) * c.alphaDecay;

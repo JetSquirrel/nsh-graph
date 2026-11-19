@@ -1,0 +1,11 @@
+{
+  "name": "nsh-graph perf",
+  "id": "dev.nshgraph.perf",
+  "version": "0.0.0",
+  "build": 1,
+  "nsh": ">=0.6",
+  "rust": ["../native"],
+  "resolve": {
+    "alias": { "nsh-graph": "../src/index.ts" }
+  }
+}

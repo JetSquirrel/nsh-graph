@@ -7,6 +7,7 @@
  */
 import {
   Canvas,
+  Path2D,
   cleanup,
   colorScheme,
   computed,
@@ -69,6 +70,12 @@ export interface GraphViewProps<N = unknown, E = unknown> {
   groupHulls?: boolean;
   /** Dropped nodes stay pinned. Default false. */
   stickyDrag?: boolean;
+  /**
+   * Several nodes can be selected: Shift-, Ctrl- or ⌘-click adds or removes a node, Shift-drag on the
+   * background draws a selection box, Shift + arrow keys add the next node, and Ctrl/⌘ + A selects all.
+   * Dragging one of the selected nodes moves them all. Default true.
+   */
+  multiSelect?: boolean;
   /** Default 0.05. */
   minZoom?: number;
   /** Default 6. */
@@ -95,13 +102,20 @@ export interface GraphViewProps<N = unknown, E = unknown> {
   accessibilityLabel?: string;
 }
 
-const KEYS = ["up", "down", "left", "right", "enter", "escape", "plus", "minus", "shift+plus", "0", "p"] as const;
+const KEYS = [
+  "up", "down", "left", "right", "enter", "escape", "plus", "minus", "shift+plus", "0", "p",
+  "shift+up", "shift+down", "shift+left", "shift+right", "mod+a",
+] as const;
 const TAP_SLOP = 5;
+/** Lets the renderer draw the Rust painter's batches (SVG path data). */
+const PATHS = { path: (d: string) => new Path2D(d) };
 const HIT_SLOP_TOUCH = 8;
 const DOUBLE_TAP_MS = 350;
 
 type Gesture = {
-  mode: "pending-pan" | "pending-drag" | "pan" | "drag" | "pinch";
+  mode: "pending-pan" | "pending-drag" | "pending-box" | "pan" | "drag" | "box" | "pinch";
+  /** Shift, Ctrl or ⌘ was held when the press began: a tap adds or removes, a drag on the background draws a box. */
+  extend: boolean;
   /** Converts page coordinates to the canvas's: local = page - origin. */
   origin: Point;
   start: Point;
@@ -126,6 +140,7 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
   // Bumped when the data or options change (what the legend and the accessibility label read).
   const dataVersion = signal(0);
   const selection = signal<Selection>(null);
+  const multi = () => props.multiSelect ?? true;
 
   const theme = computed<RenderTheme>(() => {
     const c = props.colors ?? {};
@@ -265,8 +280,11 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
     const origin = { x: e.pageX - e.locationX, y: e.pageY - e.locationY };
     const p = { x: e.locationX, y: e.locationY };
     const hit = engine.hitIndex(p.x, p.y, hitSlop);
+    const m = e.modifiers;
+    const extend = multi() && !!m && (m.shift || m.control || m.platform);
     gesture = {
-      mode: hit?.kind === "node" ? "pending-drag" : "pending-pan",
+      mode: hit?.kind === "node" ? "pending-drag" : extend && m.shift ? "pending-box" : "pending-pan",
+      extend,
       origin,
       start: p,
       last: p,
@@ -306,10 +324,17 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
         engine.hoverAt(null);
       } else if (g.mode === "pending-pan") {
         g.mode = "pan";
+      } else if (g.mode === "pending-box") {
+        g.mode = "box";
+        engine.hoverAt(null);
+        engine.marqueeStart(g.start.x, g.start.y, true);
       }
     }
     if (g.mode === "drag") {
       engine.dragMove(p.x, p.y);
+      invalidate();
+    } else if (g.mode === "box") {
+      engine.marqueeMove(p.x, p.y);
       invalidate();
     } else if (g.mode === "pan") {
       engine.holdLayout();
@@ -331,13 +356,29 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
       invalidate();
       return;
     }
+    if (g.mode === "box") {
+      engine.marqueeEnd();
+      invalidate();
+      return;
+    }
     if (g.moved || Date.now() - g.startTime > 600) return;
-    tap(local(g, e));
+    if (g.extend) extendTap(local(g, e));
+    else tap(local(g, e));
   };
 
   const onTerminate = () => {
     if (gesture?.mode === "drag") engine.dragEnd();
+    if (gesture?.mode === "box") engine.marqueeEnd();
     gesture = null;
+    invalidate();
+  };
+
+  /** A tap with Shift, Ctrl or ⌘ held: a node joins the selection or leaves it; the background keeps it. */
+  const extendTap = (p: Point) => {
+    lastTap = null;
+    const target = engine.hitTest(p.x, p.y, hitSlop);
+    if (target.kind === "node") engine.selectNodes([target.node.id], "toggle");
+    else if (target.kind === "edge") engine.setSelected({ kind: "edge", id: target.edge.id });
     invalidate();
   };
 
@@ -387,7 +428,10 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
 
   const onContextMenu = (e: ContextMenuEvent) => {
     const target = engine.hitTest(e.position.x, e.position.y, 2);
-    if (target.kind === "node") engine.setSelected({ kind: "node", id: target.node.id });
+    // A menu over one of several selected nodes acts on them all, so keep them selected.
+    if (target.kind === "node" && engine.isSelected(target.node.id)) {
+      if (engine.selected?.id !== target.node.id) engine.selectNodes([target.node.id], "add");
+    } else if (target.kind === "node") engine.setSelected({ kind: "node", id: target.node.id });
     else if (target.kind === "edge") engine.setSelected({ kind: "edge", id: target.edge.id });
     invalidate();
     props.onContextMenu?.(target as HitTarget<N, E>, { position: e.position, pagePosition: e.pagePosition });
@@ -395,9 +439,11 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
 
   // ---- Keyboard
 
-  const selectNode = (node: GraphNode | null) => {
+  /** Selects a node from the keyboard; with `extend` (Shift) it joins the selection. */
+  const selectNode = (node: GraphNode | null, extend = false) => {
     if (!node) return;
-    engine.setSelected({ kind: "node", id: node.id });
+    if (extend && multi()) engine.selectNodes([node.id], "add");
+    else engine.setSelected({ kind: "node", id: node.id });
     const p = engine.position(node.id)!;
     const s = engine.graphToScreen(p.x, p.y);
     const margin = 48;
@@ -409,11 +455,16 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
   };
 
   const onKeyDown = (e: KeyEvent) => {
+    const shift = !!e.modifiers?.shift;
+    if ((e.key === "a" || e.key === "A") && (e.modifiers?.platform || e.modifiers?.control)) {
+      if (multi()) engine.selectNodes(engine.nodes.map((n) => n.id));
+      return invalidate();
+    }
     switch (e.key) {
-      case "ArrowLeft": return selectNode(engine.nearestInDirection(-1, 0));
-      case "ArrowRight": return selectNode(engine.nearestInDirection(1, 0));
-      case "ArrowUp": return selectNode(engine.nearestInDirection(0, -1));
-      case "ArrowDown": return selectNode(engine.nearestInDirection(0, 1));
+      case "ArrowLeft": return selectNode(engine.nearestInDirection(-1, 0), shift);
+      case "ArrowRight": return selectNode(engine.nearestInDirection(1, 0), shift);
+      case "ArrowUp": return selectNode(engine.nearestInDirection(0, -1), shift);
+      case "ArrowDown": return selectNode(engine.nearestInDirection(0, 1), shift);
       case "Enter": {
         const sel = engine.selection();
         if (sel?.kind === "node") props.onNodeActivate?.(sel.node as GraphNode<N>);
@@ -434,8 +485,12 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
         return invalidate();
       case "p":
       case "P": {
+        // Every selected node follows the primary one: pinned if it was not, else released.
         const sel = engine.selection();
-        if (sel?.kind === "node") engine.setPinned(sel.node.id, !engine.isPinned(sel.node.id));
+        if (sel?.kind === "node") {
+          const pin = !engine.isPinned(sel.node.id);
+          for (const n of sel.nodes) engine.setPinned(n.id, pin);
+        }
         return invalidate();
       }
     }
@@ -448,7 +503,9 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
     dataVersion();
     const sel = selection();
     const what =
-      sel?.kind === "node"
+      sel?.kind === "node" && sel.nodes.length > 1
+        ? `, ${sel.nodes.length} nodes selected`
+        : sel?.kind === "node"
         ? `, selected ${sel.node.caption ?? sel.node.id}`
         : sel?.kind === "edge"
           ? `, selected ${sel.edge.caption ?? "edge"}`
@@ -463,7 +520,7 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
       testID={props.testID}
       role="image"
       accessibilityLabel={label()}
-      accessibilityHint="Arrow keys move between nodes, Enter opens one, plus and minus zoom, 0 fits"
+      accessibilityHint="Arrow keys move between nodes, Shift adds them to the selection, Enter opens one, plus and minus zoom, 0 fits"
       focusable
       captureKeys={KEYS}
       onKeyDown={onKeyDown}
@@ -483,7 +540,7 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
         frame();
         const t = theme();
         engine.setSize(size.width, size.height);
-        renderGraph(cx, engine, t, size.width, size.height);
+        renderGraph(cx, engine, t, size.width, size.height, PATHS);
         // The first draw may have fitted the view: let the loop pick up from here.
         untracked(wake);
       }}

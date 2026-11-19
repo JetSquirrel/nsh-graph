@@ -3,7 +3,7 @@
  * pin, relayout, inspect and export. Its reactive members (`selection`, `zoom`, `legend`, `settling`)
  * are signals, so JSX that reads them follows the graph.
  */
-import { signal, OffscreenCanvas, type Accessor } from "nsh";
+import { signal, OffscreenCanvas, Path2D, type Accessor } from "nsh";
 import type { GraphEngine } from "./engine";
 import { renderGraph, type RenderTheme } from "./render";
 import type { GraphNode, ResolvedEdge, Selection } from "./types";
@@ -128,6 +128,39 @@ export class GraphController {
     });
   }
 
+  /**
+   * Selects several nodes: `replace` (the default) selects just `ids`, `add` and `remove` change the
+   * selection by them, `toggle` flips each. The last one added becomes the primary selection.
+   */
+  selectNodes(ids: Iterable<string>, mode: "replace" | "add" | "remove" | "toggle" = "replace") {
+    this.run((e) => e.selectNodes(ids, mode));
+  }
+
+  /** Selects every node. */
+  selectAll() {
+    this.run((e) => e.selectNodes(e.nodes.map((n) => n.id)));
+  }
+
+  /** The selected nodes' ids, in the order they were selected (the primary one last). Reactive. */
+  selectedIds(): string[] {
+    const sel = this.selection();
+    return sel?.kind === "node" ? sel.nodes.map((n) => n.id) : [];
+  }
+
+  /** Whether the node is selected. Reactive. */
+  isSelected(id: string): boolean {
+    const sel = this.selection();
+    return sel?.kind === "node" && sel.nodes.some((n) => n.id === id);
+  }
+
+  /** Fits the selected nodes in view (the whole graph when none are). */
+  fitSelection() {
+    this.run((e) => {
+      if (e.selectedNodes.size === 0) return e.fit(true);
+      e.fitNodes(e.selectedNodes);
+    });
+  }
+
   /** Selects an edge by id. */
   selectEdge(id: string) {
     this.run((e) => e.setSelected({ kind: "edge", id }));
@@ -211,7 +244,7 @@ export class GraphController {
     engine.height = height;
     engine.hovered = null;
     try {
-      renderGraph(cx, engine, { ...theme, background: options.background ?? theme.background }, width, height);
+      renderGraph(cx, engine, { ...theme, background: options.background ?? theme.background }, width, height, { path: (d) => new Path2D(d) });
     } finally {
       engine.k = saved.k;
       engine.tx = saved.tx;

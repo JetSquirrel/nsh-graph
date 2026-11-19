@@ -58,9 +58,12 @@ export interface ResolvedEdge<E = unknown> extends GraphEdge<E> {
   id: string;
 }
 
-/** What is selected. */
+/**
+ * What is selected: one edge, or one or more nodes. With several nodes, `node` is the primary one (the
+ * one selected last) and `nodes` lists them all in the order they were selected, `node` last.
+ */
 export type Selection<N = unknown, E = unknown> =
-  | { kind: "node"; node: GraphNode<N> }
+  | { kind: "node"; node: GraphNode<N>; nodes: GraphNode<N>[] }
   | { kind: "edge"; edge: ResolvedEdge<E> }
   | null;
 

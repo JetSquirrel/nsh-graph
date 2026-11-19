@@ -1,0 +1,6 @@
+# nsh-graph's Rust layout runs every frame: optimize it in dev builds too (`nsh run`, `nsh test`), which
+# otherwise compile app crates at opt-level 0, about ten times slower. NSH's generated workspaces live under
+# the app (`<app>/.nsh/rust`), so Cargo finds this file from there. Apps elsewhere copy these lines into
+# their own `.cargo/config.toml`.
+[profile.dev.package.nsh-graph-native]
+opt-level = 3
