@@ -47,6 +47,16 @@ export interface EngineEdge {
   loopIndex: number;
 }
 
+/** The nodes' fills, as `GraphEngine.nodeColors` gives them. */
+export interface NodeColors {
+  /** Node i's fill. */
+  fills: string[];
+  /** The distinct fills, sorted. */
+  distinct: string[];
+  /** Node i's fill's index in `distinct`. */
+  rank: Uint32Array;
+}
+
 export interface EngineOptions {
   layout: LayoutKind;
   force: Partial<ForceConfig>;
@@ -161,6 +171,16 @@ export class GraphEngine {
 
   /** Traces edges and nodes into batched paths in Rust, when `setNativeBackend` registered a backend. */
   readonly painter: NativeGraphPainter | null;
+  /** The edges with a color or width of their own, which are drawn one by one (the rest are batched). */
+  customEdges: number[] = [];
+
+  /** Bumped when the data changes (nodes' own colors); slot changes have the slots' version. */
+  private colorStamp = 0;
+  private colorCache: { palette: readonly string[]; other: string; stamp: number; slots: number; colors: NodeColors } | null = null;
+  /** The positions the painter has, as `geometryVersion` stood when they were sent. */
+  private paintedVersion = -1;
+  private paintedNodes: EngineNode[] | null = null;
+  private paintBuffer = new Float64Array(0);
 
   constructor(options: Partial<EngineOptions> = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -262,6 +282,11 @@ export class GraphEngine {
 
     this.nodes = nodes;
     this.edges = edges;
+    this.customEdges = [];
+    edges.forEach((e, i) => {
+      if (e.edge.color || strokeWidth(e.edge.width) !== 1.5) this.customEdges.push(i);
+    });
+    this.colorStamp++;
     this.byId = byId;
     this.edgeById = edgeById;
     this.updateRadii();
@@ -1114,6 +1139,45 @@ export class GraphEngine {
   colorOf(n: EngineNode, palette: readonly string[], other = OTHER): string {
     if (n.node.color) return n.node.color;
     return this.keyColor(this.colorKey(n), palette, other);
+  }
+
+  /**
+   * Every node's fill (`colorOf`), and the distinct fills sorted, with each node's rank among them, for
+   * batching nodes by color. Kept until the data, `colorBy` or the palette change, so a frame does not
+   * look every node's color up again.
+   */
+  nodeColors(palette: readonly string[], other = OTHER): NodeColors {
+    const c = this.colorCache;
+    // `setCapacity` first: a palette of another length gives new slots.
+    this.slots.setCapacity(palette.length);
+    if (c && c.palette === palette && c.other === other && c.stamp === this.colorStamp && c.slots === this.slots.version) return c.colors;
+    const fills = this.nodes.map((n) => this.colorOf(n, palette, other));
+    const distinct = [...new Set(fills)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const rankOf = new Map(distinct.map((f, i) => [f, i]));
+    const rank = new Uint32Array(fills.length);
+    for (let i = 0; i < fills.length; i++) rank[i] = rankOf.get(fills[i])!;
+    const colors = { fills, distinct, rank };
+    // The slots' version after the lookups, which may have given slots to keys first seen.
+    this.colorCache = { palette, other, stamp: this.colorStamp, slots: this.slots.version, colors };
+    return colors;
+  }
+
+  /** Hands the nodes' positions and radii to the painter, unless it has them already. */
+  paintPositions(painter: NativeGraphPainter) {
+    if (this.paintedVersion === this.geometryVersion && this.paintedNodes === this.nodes) return;
+    const nodes = this.nodes;
+    const n = nodes.length;
+    if (this.paintBuffer.length !== n * 3) this.paintBuffer = new Float64Array(n * 3);
+    const pos = this.paintBuffer;
+    for (let i = 0, j = 0; i < n; i++, j += 3) {
+      const node = nodes[i];
+      pos[j] = node.x;
+      pos[j + 1] = node.y;
+      pos[j + 2] = node.r;
+    }
+    painter.setNodes(new Uint8Array(pos.buffer));
+    this.paintedVersion = this.geometryVersion;
+    this.paintedNodes = nodes;
   }
 
   /** The color of a category (or group): its palette slot; nodes without one, and those past the palette's end, share `other`. */

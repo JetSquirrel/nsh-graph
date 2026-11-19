@@ -2,8 +2,6 @@
 //! `new Path2D(d)` instead of a canvas call per segment, arc and arrow (gpui-graph batches its edges into
 //! one path per state the same way). The shapes are `src/geometry.ts`'s `edgeShape`, step for step.
 
-use std::fmt::Write;
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pt {
     pub x: f64,
@@ -87,6 +85,8 @@ pub struct EdgeStyle {
     pub arrows: bool,
     /// Arrow length, in graph units.
     pub arrow_len: f64,
+    /// The most decimals a coordinate gets (0 to 2): fewer when zoomed out, where they cannot be seen.
+    pub decimals: u32,
 }
 
 /// One state's edges: their strokes, and their arrow heads to fill.
@@ -96,20 +96,15 @@ pub struct EdgeBatch {
     pub arrows: String,
 }
 
-/// Coordinates with two decimals: plenty in graph units, and short strings to parse. Written by hand:
-/// `fmt` costs several times more, and a frame writes tens of thousands of them.
-struct Num(f64);
+/// The most decimals a coordinate gets: plenty in graph units at any zoom.
+pub const MAX_DECIMALS: u32 = 2;
 
-impl std::fmt::Display for Num {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut buf = [0u8; 32];
-        f.write_str(fixed2(self.0, &mut buf))
-    }
-}
-
-/// `v` with at most two decimals, trailing zeros dropped ("12.5", "-3", "0.07"), in `buf`.
-fn fixed2(v: f64, buf: &mut [u8; 32]) -> &str {
-    let scaled = (v * 100.).round();
+/// `v` with at most `decimals` (0 to 2) decimals, trailing zeros dropped ("12.5", "-3", "0.07"), in
+/// `buf`. Written by hand: `fmt` costs several times more, and a frame writes tens of thousands of them.
+fn fixed(v: f64, decimals: u32, buf: &mut [u8; 32]) -> &str {
+    let decimals = decimals.min(MAX_DECIMALS);
+    let scale = 10u64.pow(decimals);
+    let scaled = (v * scale as f64).round();
     if !scaled.is_finite() || scaled.abs() >= 1e17 {
         return "0";
     }
@@ -118,10 +113,14 @@ fn fixed2(v: f64, buf: &mut [u8; 32]) -> &str {
     let mut n = scaled.abs() as u64;
     let mut end = buf.len();
     // Fraction first (dropping trailing zeros), then the integer part, right to left.
-    let mut frac = n % 100;
-    n /= 100;
+    let mut frac = n % scale;
+    n /= scale;
     if frac != 0 {
-        let digits = if frac % 10 == 0 { frac /= 10; 1 } else { 2 };
+        let mut digits = decimals;
+        while frac % 10 == 0 {
+            frac /= 10;
+            digits -= 1;
+        }
         for _ in 0..digits {
             end -= 1;
             buf[end] = b'0' + (frac % 10) as u8;
@@ -143,6 +142,30 @@ fn fixed2(v: f64, buf: &mut [u8; 32]) -> &str {
         buf[end] = b'-';
     }
     std::str::from_utf8(&buf[end..]).unwrap_or("0")
+}
+
+/// Writes SVG path data: commands and their numbers pushed straight onto the string (no `fmt`).
+struct PathData<'a> {
+    s: &'a mut String,
+    decimals: u32,
+}
+
+impl PathData<'_> {
+    fn num(&mut self, v: f64) {
+        let mut buf = [0u8; 32];
+        self.s.push_str(fixed(v, self.decimals, &mut buf));
+    }
+
+    /// `c` and then `values`, space-separated ("M1 2", "Q1 2 3 4").
+    fn cmd(&mut self, c: char, values: &[f64]) {
+        self.s.push(c);
+        for (j, &v) in values.iter().enumerate() {
+            if j > 0 {
+                self.s.push(' ');
+            }
+            self.num(v);
+        }
+    }
 }
 
 /// Whether the edge between (s, rs) and (t, rt) may reach into `v` (`edgeMayTouch` in the engine).
@@ -172,6 +195,7 @@ pub fn trace_edges(edges: &[Edge], states: &[u8], x: &[f64], y: &[f64], r: &[f64
             continue;
         }
         let batch = &mut out[state as usize];
+        let mut lines = PathData { s: &mut batch.lines, decimals: style.decimals };
         let shape = edge_shape(s, r[si], t, r[ti], e.bend, e.self_loop, e.loop_index);
         let (b, end_angle) = match shape {
             Shape::Line { a, b, end_angle } => {
@@ -182,34 +206,28 @@ pub fn trace_edges(edges: &[Edge], states: &[u8], x: &[f64], y: &[f64], r: &[f64
                     bx -= end_angle.cos() * back;
                     by -= end_angle.sin() * back;
                 }
-                let _ = write!(batch.lines, "M{} {}L{} {}", Num(a.x), Num(a.y), Num(bx), Num(by));
+                lines.cmd('M', &[a.x, a.y]);
+                lines.cmd('L', &[bx, by]);
                 (b, end_angle)
             }
             Shape::Quad { a, c, b, end_angle } => {
-                let _ = write!(batch.lines, "M{} {}Q{} {} {} {}", Num(a.x), Num(a.y), Num(c.x), Num(c.y), Num(b.x), Num(b.y));
+                lines.cmd('M', &[a.x, a.y]);
+                lines.cmd('Q', &[c.x, c.y, b.x, b.y]);
                 (b, end_angle)
             }
             Shape::Cubic { a, c1, c2, b, end_angle } => {
-                let _ = write!(
-                    batch.lines,
-                    "M{} {}C{} {} {} {} {} {}",
-                    Num(a.x), Num(a.y), Num(c1.x), Num(c1.y), Num(c2.x), Num(c2.y), Num(b.x), Num(b.y)
-                );
+                lines.cmd('M', &[a.x, a.y]);
+                lines.cmd('C', &[c1.x, c1.y, c2.x, c2.y, b.x, b.y]);
                 (b, end_angle)
             }
         };
         if style.arrows {
             let len = style.arrow_len;
-            let _ = write!(
-                batch.arrows,
-                "M{} {}L{} {}L{} {}Z",
-                Num(b.x),
-                Num(b.y),
-                Num(b.x - (end_angle - spread).cos() * len),
-                Num(b.y - (end_angle - spread).sin() * len),
-                Num(b.x - (end_angle + spread).cos() * len),
-                Num(b.y - (end_angle + spread).sin() * len),
-            );
+            let mut heads = PathData { s: &mut batch.arrows, decimals: style.decimals };
+            heads.cmd('M', &[b.x, b.y]);
+            heads.cmd('L', &[b.x - (end_angle - spread).cos() * len, b.y - (end_angle - spread).sin() * len]);
+            heads.cmd('L', &[b.x - (end_angle + spread).cos() * len, b.y - (end_angle + spread).sin() * len]);
+            heads.s.push('Z');
         }
     }
     out
@@ -217,8 +235,10 @@ pub fn trace_edges(edges: &[Edge], states: &[u8], x: &[f64], y: &[f64], r: &[f64
 
 /// Traces the nodes as circles, one path per batch: `keys[i]` names node i's batch (its color and
 /// dimming, as the TypeScript numbered them), `u32::MAX` leaves it out. Off-screen nodes are left out.
-pub fn trace_nodes(keys: &[u32], batches: usize, x: &[f64], y: &[f64], r: &[f64], view: &Rect) -> Vec<String> {
+/// Coordinates get `decimals` decimals at most.
+pub fn trace_nodes(keys: &[u32], batches: usize, x: &[f64], y: &[f64], r: &[f64], view: &Rect, decimals: u32) -> Vec<String> {
     let mut out = vec![String::new(); batches];
+    let (mut bx0, mut bx1, mut by, mut br) = ([0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32]);
     for i in 0..x.len().min(keys.len()) {
         let k = keys[i] as usize;
         if k >= batches {
@@ -229,18 +249,24 @@ pub fn trace_nodes(keys: &[u32], batches: usize, x: &[f64], y: &[f64], r: &[f64]
             continue;
         }
         let rr = r[i].max(0.);
+        // Each number once, though the circle names most of them twice.
+        let (x0, x1) = (fixed(cx + rr, decimals, &mut bx0), fixed(cx - rr, decimals, &mut bx1));
+        let (yy, rs) = (fixed(cy, decimals, &mut by), fixed(rr, decimals, &mut br));
         // Two half-circle arcs: SVG has no full-circle command.
-        let _ = write!(
-            out[k],
-            "M{} {}A{r} {r} 0 1 0 {} {}A{r} {r} 0 1 0 {} {}Z",
-            Num(cx + rr),
-            Num(cy),
-            Num(cx - rr),
-            Num(cy),
-            Num(cx + rr),
-            Num(cy),
-            r = Num(rr),
-        );
+        let s = &mut out[k];
+        for (c, x) in [('M', x0), ('A', x1), ('A', x0)] {
+            s.push(c);
+            if c == 'A' {
+                s.push_str(rs);
+                s.push(' ');
+                s.push_str(rs);
+                s.push_str(" 0 1 0 ");
+            }
+            s.push_str(x);
+            s.push(' ');
+            s.push_str(yy);
+        }
+        s.push('Z');
     }
     out
 }
@@ -260,7 +286,7 @@ mod tests {
             &[0., 100.],
             &[0., 0.],
             &[10., 20.],
-            &EdgeStyle { view: VIEW, arrows: true, arrow_len: 10. },
+            &EdgeStyle { view: VIEW, arrows: true, arrow_len: 10., decimals: 2 },
         );
         // From x = 10 (the source's edge) to 80 (the target's) less 7 under the arrow.
         assert_eq!(normal.lines, "M10 0L73 0");
@@ -281,7 +307,7 @@ mod tests {
             &[0., 100.],
             &[0., 0.],
             &[10., 10.],
-            &EdgeStyle { view: VIEW, arrows: false, arrow_len: 0. },
+            &EdgeStyle { view: VIEW, arrows: false, arrow_len: 0., decimals: 2 },
         );
         assert!(out[0].lines.starts_with('M') && !out[0].lines.contains('Q'));
         assert!(out[2].lines.contains('Q'));
@@ -297,16 +323,16 @@ mod tests {
         let x = [10., 40., 500., 600.];
         let y = [10., 40., 500., 600.];
         let r = [5.; 4];
-        let out = trace_edges(&edges, &[1, 1], &x, &y, &r, &EdgeStyle { view, arrows: false, arrow_len: 0. });
+        let out = trace_edges(&edges, &[1, 1], &x, &y, &r, &EdgeStyle { view, arrows: false, arrow_len: 0., decimals: 2 });
         assert_eq!(out[1].lines.matches('M').count(), 1);
-        let nodes = trace_nodes(&[0, 1, 0, u32::MAX], 2, &x, &y, &r, &view);
+        let nodes = trace_nodes(&[0, 1, 0, u32::MAX], 2, &x, &y, &r, &view, 2);
         assert_eq!(nodes[0], "M15 10A5 5 0 1 0 5 10A5 5 0 1 0 15 10Z");
         assert_eq!(nodes[1].matches('M').count(), 1);
     }
 
     #[test]
     fn numbers_have_two_decimals_at_most() {
-        let s = |v: f64| Num(v).to_string();
+        let s = |v: f64| fixed(v, 2, &mut [0; 32]).to_string();
         assert_eq!(s(12.5), "12.5");
         assert_eq!(s(-3.), "-3");
         assert_eq!(s(0.07), "0.07");
@@ -316,6 +342,32 @@ mod tests {
         assert_eq!(s(0.), "0");
         assert_eq!(s(100.1), "100.1");
         assert_eq!(s(f64::NAN), "0");
+        assert_eq!(fixed(1234.567, 5, &mut [0; 32]), "1234.57");
+    }
+
+    #[test]
+    fn fewer_decimals_round_to_fewer() {
+        let s = |v: f64, d: u32| fixed(v, d, &mut [0; 32]).to_string();
+        assert_eq!(s(1234.567, 1), "1234.6");
+        assert_eq!(s(1234.567, 0), "1235");
+        assert_eq!(s(-12.04, 1), "-12");
+        assert_eq!(s(-0.4, 0), "0");
+        assert_eq!(s(9.96, 1), "10");
+        assert_eq!(s(0.5, 1), "0.5");
+    }
+
+    #[test]
+    fn zoomed_out_paths_are_shorter_and_the_same_shape() {
+        let edges = [Edge { source: 0, target: 1, ..Edge::default() }];
+        let (x, y, r) = ([0.123, 100.456], [0.789, 50.321], [10.5, 12.25]);
+        let at = |decimals| trace_edges(&edges, &[1], &x, &y, &r, &EdgeStyle { view: VIEW, arrows: true, arrow_len: 7., decimals });
+        let (fine, coarse) = (at(2), at(0));
+        assert!(coarse[1].lines.len() < fine[1].lines.len());
+        assert_eq!(coarse[1].lines.matches(' ').count(), fine[1].lines.matches(' ').count());
+        assert!(!coarse[1].lines.contains('.') && !coarse[1].arrows.contains('.'));
+        let circles = trace_nodes(&[0, 0], 1, &x, &y, &r, &VIEW, 0);
+        assert_eq!(circles[0].matches('Z').count(), 2);
+        assert!(!circles[0].contains('.'));
     }
 
     #[test]

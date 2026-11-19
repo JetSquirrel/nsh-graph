@@ -217,13 +217,14 @@ Measured in NSH's headless runtime (`nsh test perf`), TypeScript → Rust:
 
 | Graph | Tick | Settles in | Draw |
 |---|---|---|---|
-| Flare imports, 220 / 764 | 15 → 0.6 ms | 5.0 → 0.15 s | |
-| Star, 301 / 300 | 22 → 0.6 ms | 5.7 → 0.17 s | |
-| Scale-free, 1500 / 2997 | 85 → 4.6 ms | 40 → 1.9 s | 20 → 12 ms |
-| Scale-free, 5000 / 9997 | 286 → 15 ms | (minutes) → 4.7 s | 70 → 41 ms |
+| Flare imports, 220 / 764 | 13 → 0.6 ms | 3.6 → 0.11 s | |
+| Star, 301 / 300 | 18 → 0.7 ms | 5.1 → 0.16 s | |
+| Scale-free, 1500 / 2997 | 73 → 3.4 ms | 20 → 0.9 s | 18 → 2.6 ms |
+| Scale-free, 5000 / 9997 | 285 → 13.5 ms | (minutes) → 3.6 s | 55 → 9.8 ms |
 
-Edge-length spread and crowding are the same both ways. Most of what is left of a Rust tick is copying
-positions between JS objects and Rust; `nsh run perf` shows 1500 to 10000 nodes either way.
+Edge-length spread and crowding are the same both ways. About a third of a 5000-node Rust tick is copying
+positions between JS objects and Rust, and most of the rest is the many-body force; `nsh run perf` shows
+1500 to 10000 nodes either way.
 
 ## Compared with other libraries
 

@@ -41,11 +41,14 @@ export class SlotAssigner {
   /** key -> slot; -1 for a key past the palette's end. */
   private slots = new Map<string, number>();
   private present: string[] = [];
+  /** Bumped whenever slots may have changed, so colors worked out from them can be kept until then. */
+  version = 0;
 
   constructor(private capacity: number) {}
 
   /** Declares the keys now shown, biggest first, and gives slots to those without one. */
   prepare(keysBySize: string[]) {
+    this.version++;
     this.present = keysBySize;
     const shown = new Set(keysBySize);
     const taken = new Set<number>();
@@ -90,6 +93,7 @@ export class SlotAssigner {
 
   /** Forgets every slot (call `prepare` next). */
   reset() {
+    this.version++;
     this.slots.clear();
     this.present = [];
   }
