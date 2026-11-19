@@ -345,6 +345,38 @@ describe("colors and geometry", () => {
     expect(legend.map((e) => [e.key, e.color])).toEqual([["g1", PALETTE_LIGHT[0]], ["g2", PALETTE_LIGHT[1]], ["", OTHER]]);
   });
 
+  test("the colors a frame draws with follow the data, colorBy and the palette", () => {
+    const engine = sized();
+    const fills = (palette: readonly string[] = PALETTE_LIGHT) => {
+      const c = engine.nodeColors(palette, OTHER);
+      // What the cache gives is what colorOf says, and ranks index the sorted distinct fills.
+      expect(c.fills).toEqual(engine.nodes.map((n) => engine.colorOf(n, palette, OTHER)));
+      expect(c.distinct).toEqual([...new Set(c.fills)].sort());
+      c.fills.forEach((f, i) => expect(c.distinct[c.rank[i]]).toBe(f));
+      return c.fills;
+    };
+    engine.setData({ nodes: [{ id: "a", category: "A", group: "g" }, { id: "b", category: "B", group: "g" }], edges: [] });
+    const first = fills();
+    expect(engine.nodeColors(PALETTE_LIGHT, OTHER).fills).toBe(first); // kept between frames
+    engine.setData({ nodes: [{ id: "a", category: "A", group: "g" }, { id: "b", category: "B", group: "g", color: "#123456" }], edges: [] });
+    expect(fills()[1]).toBe("#123456");
+    engine.setOptions({ colorBy: "group" });
+    const byGroup = fills();
+    expect(byGroup[0]).toBe(PALETTE_LIGHT[0]);
+    expect(fills(PALETTE_LIGHT.slice(0, 1))).toEqual([PALETTE_LIGHT[0], "#123456"]);
+  });
+
+  test("edges with their own color or width are listed to be drawn on their own", () => {
+    const engine = sized();
+    engine.setData({
+      nodes: [{ id: "a" }, { id: "b" }],
+      edges: [{ from: "a", to: "b" }, { from: "a", to: "b", color: "#f00" }, { from: "b", to: "a", width: 3 }, { from: "b", to: "a", width: 1.5 }],
+    });
+    expect(engine.customEdges).toEqual([1, 2]);
+    engine.setData({ nodes: [{ id: "a" }, { id: "b" }], edges: [{ from: "a", to: "b" }] });
+    expect(engine.customEdges).toEqual([]);
+  });
+
   test("captions inside nodes are white except on yellow", () => {
     expect(PALETTE_LIGHT.map(inkOn)).toEqual(PALETTE_LIGHT.map((c) => (c === "#eda100" ? "#0b0b0b" : "#ffffff")));
   });

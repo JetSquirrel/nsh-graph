@@ -38,6 +38,14 @@ fn rect(v: &[f64]) -> Result<Rect, String> {
     }
 }
 
+/// A decimals count as JS gave it (absent, NaN or out of range: the most there are).
+fn decimals(v: Option<&f64>) -> u32 {
+    match v {
+        Some(&d) if d >= 0. => (d as u32).min(paint::MAX_DECIMALS),
+        _ => paint::MAX_DECIMALS,
+    }
+}
+
 /// Traces a frame's edges and nodes as SVG path data, one string per batch, for the renderer to draw
 /// with `new Path2D(d)`: a few canvas calls a frame instead of several per edge and node.
 #[class]
@@ -88,24 +96,28 @@ impl GraphPainter {
     }
 
     /// The edges' paths, one u8 state per edge (0 dimmed, 1 normal, 2 highlighted, else left out), with
-    /// `style` = x0, y0, x1, y1 (the graph-space view), arrows (1 or 0), arrow length. Returns six strings:
-    /// the lines and arrow heads of states 0, 1 and 2.
+    /// `style` = x0, y0, x1, y1 (the graph-space view), arrows (1 or 0), arrow length, and optionally the
+    /// most decimals a coordinate gets (0 to 2, default 2). Returns six strings: the lines and arrow heads
+    /// of states 0, 1 and 2.
     pub fn trace_edges(&self, states: Vec<u8>, style: Vec<f64>) -> Result<Vec<String>, String> {
         let view = rect(&style)?;
         let style = EdgeStyle {
             view,
             arrows: style.get(4).is_some_and(|&a| a != 0.),
             arrow_len: style.get(5).copied().unwrap_or(0.),
+            decimals: decimals(style.get(6)),
         };
         let batches = paint::trace_edges(&self.edges, &states, &self.x, &self.y, &self.r, &style);
         Ok(batches.into_iter().flat_map(|b| [b.lines, b.arrows]).collect())
     }
 
     /// The nodes' circles in `batches` paths: one u32 batch per node (u32::MAX leaves it out), and the
-    /// graph-space view (x0, y0, x1, y1) outside which nodes are left out.
+    /// graph-space view (x0, y0, x1, y1) outside which nodes are left out, then optionally the most
+    /// decimals a coordinate gets (0 to 2, default 2).
     pub fn trace_nodes(&self, keys: Vec<u8>, batches: f64, view: Vec<f64>) -> Result<Vec<String>, String> {
         let keys: Vec<u32> = keys.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
-        Ok(paint::trace_nodes(&keys, batches.clamp(0., 1e6) as usize, &self.x, &self.y, &self.r, &rect(&view)?))
+        let decimals = decimals(view.get(4));
+        Ok(paint::trace_nodes(&keys, batches.clamp(0., 1e6) as usize, &self.x, &self.y, &self.r, &rect(&view)?, decimals))
     }
 }
 

@@ -102,7 +102,7 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   }
   if (nodes.length === 0) return;
 
-  const fills = nodes.map((n) => engine.colorOf(n, theme.palette, theme.other));
+  const { fills, distinct, rank } = engine.nodeColors(theme.palette, theme.other);
   const focus = engine.focus();
   const selectedId = engine.selected;
   const selNode = selectedId?.kind === "node" ? engine.engineNode(selectedId.id)?.index ?? -1 : -1;
@@ -134,6 +134,9 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   cx.lineCap = "round";
   cx.lineJoin = "round";
   const px = 1 / k; // one screen point, in graph units
+  // The decimals the Rust painter writes coordinates with: fewer when zoomed out, where they cannot be
+  // seen (rounding moves a point 0.05 screen points at most, up to 10× zoom), for shorter paths to parse.
+  const decimals = k <= 0.1 ? 0 : k <= 1 ? 1 : 2;
 
   // ---- Community hulls
   if (options.groupHulls) {
@@ -161,12 +164,13 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
     }
   }
 
-  // ---- Edges, in three passes: dimmed, normal, highlighted.
-  const state = (i: number): 0 | 1 | 2 => {
-    if (i === hoverEdge || i === selEdge) return 2;
-    if (!focus) return 1;
-    return focus.edges.has(i) ? 2 : 0;
-  };
+  // ---- Edges, in three passes: dimmed, normal, highlighted. Each edge's state, worked out once.
+  const states = new Uint8Array(edges.length);
+  if (!focus) states.fill(1);
+  else for (const i of focus.edges) states[i] = 2;
+  if (hoverEdge >= 0) states[hoverEdge] = 2;
+  if (selEdge >= 0) states[selEdge] = 2;
+  const state = (i: number) => states[i] as 0 | 1 | 2;
   const arrowLen = (w: number) => Math.max(7, w * 3.2);
   const edgeWidth = (i: number) => Math.max(strokeWidth(edges[i].edge.width), 0.75 * px);
 
@@ -195,47 +199,42 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   };
 
   const arrows = options.arrows && arrowLen(1.5) * k >= 3.5;
-  const custom = (i: number) => {
-    const e = edges[i].edge;
-    return !!e.color || strokeWidth(e.width) !== 1.5;
-  };
-  // With the Rust painter, the default-look edges of each pass come back as two SVG paths.
+  // Edges with a color or width of their own are drawn one by one; the others share a path per pass.
+  const customs = engine.customEdges;
   let traced: string[] | null = null;
+  const batches: number[][] = [[], [], []];
   if (native) {
-    const pos = new Float64Array(nodes.length * 3);
-    for (let i = 0; i < nodes.length; i++) {
-      pos[i * 3] = nodes[i].x;
-      pos[i * 3 + 1] = nodes[i].y;
-      pos[i * 3 + 2] = nodes[i].r;
+    // The Rust painter traces each pass's default-look edges into two SVG paths (lines, arrow heads).
+    engine.paintPositions(native.painter);
+    let sent = states;
+    if (customs.length > 0) {
+      sent = states.slice();
+      for (const i of customs) sent[i] = 255;
     }
-    native.painter.setNodes(new Uint8Array(pos.buffer));
-    const states = new Uint8Array(edges.length);
-    for (let i = 0; i < edges.length; i++) states[i] = custom(i) ? 255 : state(i);
-    traced = native.painter.traceEdges(states, [vx0, vy0, vx1, vy1, arrows ? 1 : 0, arrowLen(Math.max(1.5, 0.75 * px))]);
+    traced = native.painter.traceEdges(sent, [vx0, vy0, vx1, vy1, arrows ? 1 : 0, arrowLen(Math.max(1.5, 0.75 * px)), decimals]);
+  } else {
+    const isCustom = new Uint8Array(edges.length);
+    for (const i of customs) isCustom[i] = 1;
+    for (let i = 0; i < edges.length; i++) {
+      if (isCustom[i] === 0 && edgeVisible(i)) batches[states[i]].push(i);
+    }
   }
   for (const pass of [0, 1, 2] as const) {
     const color = pass === 2 ? theme.edgeHighlight : theme.edge;
     cx.globalAlpha = pass === 0 ? DIM : 1;
-    // Edges with the default look share one path; custom ones are drawn on their own.
-    const batch: number[] = [];
-    for (let i = 0; i < edges.length; i++) {
-      if (traced && !custom(i)) continue;
-      if (state(i) !== pass || !edgeVisible(i)) continue;
+    for (const i of customs) {
+      if (states[i] !== pass || !edgeVisible(i)) continue;
       const e = edges[i].edge;
-      if (custom(i)) {
+      cx.beginPath();
+      tracePath(shape(i), i);
+      cx.strokeStyle = pass === 2 && !e.color ? color : (e.color ?? color);
+      cx.lineWidth = edgeWidth(i) * (pass === 2 ? 1.4 : 1);
+      cx.stroke();
+      if (arrows) {
         cx.beginPath();
-        tracePath(shape(i), i);
-        cx.strokeStyle = pass === 2 && !e.color ? color : (e.color ?? color);
-        cx.lineWidth = edgeWidth(i) * (pass === 2 ? 1.4 : 1);
-        cx.stroke();
-        if (arrows) {
-          cx.beginPath();
-          traceArrow(shape(i), i);
-          cx.fillStyle = cx.strokeStyle;
-          cx.fill();
-        }
-      } else {
-        batch.push(i);
+        traceArrow(shape(i), i);
+        cx.fillStyle = cx.strokeStyle;
+        cx.fill();
       }
     }
     if (traced && native) {
@@ -252,6 +251,7 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
       }
       continue;
     }
+    const batch = batches[pass];
     if (batch.length === 0) continue;
     cx.beginPath();
     for (const i of batch) tracePath(shape(i), i);
@@ -267,54 +267,55 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   }
   cx.globalAlpha = 1;
 
-  // ---- Nodes: one path per color (dimmed ones first, beneath), not a fill and a stroke per node.
-  const batches = new Map<string, number[]>();
+  // ---- Nodes: one path per color (dimmed ones first, beneath), not a fill and a stroke per node. Batch b
+  // holds the dimmed nodes of color `distinct[b]` for b < nc, the others of `distinct[b - nc]` after them.
+  const nc = distinct.length;
+  const nb = nc * 2;
+  const counts = new Uint32Array(nb);
+  // Whether a batch has a node big enough on screen for a ring.
+  const ringed = new Uint8Array(nb);
+  const keys = native ? new Uint32Array(nodes.length) : null;
+  const members: number[][] | null = native ? null : Array.from({ length: nb }, () => []);
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
-    if (!visible(n.x, n.y)) continue;
-    const key = (focus !== null && !focus.nodes.has(i) ? "0" : "1") + fills[i];
-    const batch = batches.get(key);
-    if (batch) batch.push(i);
-    else batches.set(key, [i]);
-  }
-  const sorted = [...batches.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  if (native) {
-    // The Rust painter traces each batch's circles into one path.
-    const keys = new Uint32Array(nodes.length).fill(0xffffffff);
-    sorted.forEach(([, batch], b) => {
-      for (const i of batch) keys[i] = b;
-    });
-    const circles = native.painter.traceNodes(new Uint8Array(keys.buffer), sorted.length, [vx0, vy0, vx1, vy1]);
-    sorted.forEach(([key, batch], b) => {
-      if (!circles[b]) return;
-      cx.globalAlpha = key[0] === "0" ? DIM + 0.1 : 1;
-      const path = native.path(circles[b]);
-      cx.fillStyle = key.slice(1);
-      cx.fill(path);
-      if (batch.some((i) => nodes[i].r * k >= 5)) {
-        cx.strokeStyle = theme.surface;
-        cx.lineWidth = 1.5 * px;
-        cx.stroke(path);
-      }
-    });
-  }
-  for (const [key, batch] of native ? [] : sorted) {
-    cx.globalAlpha = key[0] === "0" ? DIM + 0.1 : 1;
-    cx.beginPath();
-    let rings = false;
-    for (const i of batch) {
-      const n = nodes[i];
-      cx.moveTo(n.x + n.r, n.y);
-      cx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-      if (n.r * k >= 5) rings = true;
+    const x = n.x;
+    const y = n.y;
+    if (!(x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1)) {
+      if (keys) keys[i] = 0xffffffff;
+      continue;
     }
-    cx.fillStyle = key.slice(1);
-    cx.fill();
+    const b = (focus !== null && !focus.nodes.has(i) ? 0 : nc) + rank[i];
+    if (keys) keys[i] = b;
+    else members![b].push(i);
+    counts[b]++;
+    if (n.r * k >= 5) ringed[b] = 1;
+  }
+  // The Rust painter traces each batch's circles into one path.
+  const circles = native && keys ? native.painter.traceNodes(new Uint8Array(keys.buffer), nb, [vx0, vy0, vx1, vy1, decimals]) : null;
+  for (let b = 0; b < nb; b++) {
+    if (counts[b] === 0) continue;
+    cx.globalAlpha = b < nc ? DIM + 0.1 : 1;
+    cx.fillStyle = distinct[b % nc];
+    let path: unknown;
+    if (circles && native) {
+      if (!circles[b]) continue;
+      path = native.path(circles[b]);
+      cx.fill(path);
+    } else {
+      cx.beginPath();
+      for (const i of members![b]) {
+        const n = nodes[i];
+        cx.moveTo(n.x + n.r, n.y);
+        cx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      }
+      cx.fill();
+    }
     // A thin ring of the surface color keeps touching nodes apart (not worth drawing on specks).
-    if (rings) {
+    if (ringed[b]) {
       cx.strokeStyle = theme.surface;
       cx.lineWidth = 1.5 * px;
-      cx.stroke();
+      if (path !== undefined) cx.stroke(path);
+      else cx.stroke();
     }
   }
   cx.globalAlpha = 1;

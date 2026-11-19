@@ -23,7 +23,9 @@ export interface NativeForceLayout {
 export interface NativeGraphPainter {
   setEdges(edges: Uint8Array): void;
   setNodes(nodes: Uint8Array): void;
+  /** `style`: x0, y0, x1, y1, arrows (1 or 0), arrow length, then optionally decimals (0 to 2, default 2). */
   traceEdges(states: Uint8Array, style: number[]): string[];
+  /** `view`: x0, y0, x1, y1, then optionally decimals (0 to 2, default 2). */
   traceNodes(keys: Uint8Array, batches: number, view: number[]): string[];
 }
 
