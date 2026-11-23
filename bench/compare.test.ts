@@ -2,8 +2,12 @@
  * nsh-graph's layout next to other JS layout engines, all run inside NSH's QuickJS runtime on the same
  * datasets: time to a finished layout, and layout quality measured the same way for every engine.
  *
- * Cytoscape.js is not here: it does not load in NSH, whose sandbox freezes the built-in prototypes
- * (cytoscape assigns `indexOf` on an object whose prototype chain has Array.prototype's).
+ * Engines that can't run here:
+ * - Cytoscape.js does not load in NSH, whose sandbox freezes the built-in prototypes (cytoscape assigns
+ *   `indexOf` on an object whose prototype chain has Array.prototype's).
+ * - ngraph.forcelayout (VivaGraph, ngraph) builds its physics with `new Function`, which NSH refuses: it runs no
+ *   code from strings outside development builds.
+ * - AntV G6 needs a DOM, but its layouts are @antv/layout, which runs here: G6 5's `force` and `fruchterman`.
  *
  *   nsh test bench
  *
@@ -17,6 +21,8 @@ import { forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY
 // graphology imports Node's `events`, which NSH does not provide: vendor/graphology.js is it bundled with
 // the browser polyfill (`bun build vendor/graphology-entry.js --target=browser --format=esm`).
 import { Graph, forceAtlas2 } from "./vendor/graphology.js";
+import { ForceLayout, FruchtermanLayout } from "@antv/layout";
+import { Layout as ColaLayout } from "webcola";
 import { GraphEngine } from "../src/engine";
 import { datasets } from "../example/datasets";
 
@@ -145,6 +151,70 @@ async function runFA2(id: string): Promise<Result> {
   };
 }
 
+/**
+ * A layout of @antv/layout, the engine of AntV G6 5, with G6's defaults on a 1000 × 700 canvas. Without a
+ * `window` its simulation runs to the end in one call, which NSH stops after 2 s, so `execute` only sets it up
+ * (no iterations) and the loop below ticks it until the simulation's own rule says it is done: `maxIteration`
+ * steps, or a step that moves the nodes less than `minMovement`.
+ */
+async function runAntV(id: string, kind: "force" | "fruchterman"): Promise<Result> {
+  const { n, edges, ids } = load(id);
+  const clock = stopwatch();
+  const Kind = kind === "force" ? ForceLayout : FruchtermanLayout;
+  const defaults = kind === "force" ? { maxIteration: 500, minMovement: 0.4 } : { maxIteration: 1000, minMovement: 0 };
+  const layout = new (Kind as any)({ width: 1000, height: 700, animate: false, maxIteration: 0 });
+  await layout.execute({
+    nodes: ids.map((nid) => ({ id: nid })),
+    edges: edges.map(([s, t], i) => ({ id: `e${i}`, source: ids[s], target: ids[t] })),
+  });
+  const sim = layout.simulation;
+  let steps = 0;
+  const running = () => steps < defaults.maxIteration && (sim.judgingDistance > defaults.minMovement || steps < 1);
+  while (running() && clock.ms() < BUDGET_MS) {
+    layout.tick(1);
+    steps++;
+    await clock.busy();
+  }
+  const at = new Map<string, Pos[number]>();
+  layout.forEachNode((node: any) => at.set(node.id, { x: node.x, y: node.y }));
+  return {
+    engine: kind === "force" ? "AntV force (G6 5)" : "AntV Fruchterman (G6 5)",
+    finished: !running(),
+    ms: clock.ms(),
+    steps,
+    pos: Array.from({ length: n }, (_, i) => at.get(ids[i])!),
+  };
+}
+
+/**
+ * WebCola, the constraint-based layout often used with d3: stress majorization on all-pairs shortest paths,
+ * with its defaults (link length 20, convergence threshold 0.01). `start` only sets it up; the loop ticks it
+ * until it converges, as `start` would in one call.
+ */
+const COLA_MAX_NODES = 1000;
+
+async function runCola(id: string): Promise<Result> {
+  const { n, edges } = load(id);
+  const clock = stopwatch();
+  let seed = 1;
+  const rand = () => ((seed = (Math.imul(1664525, seed) + 1013904223) >>> 0) / 4294967296);
+  const nodes = Array.from({ length: n }, () => ({ x: rand() * 1000, y: rand() * 700 }) as any);
+  const layout: any = new ColaLayout().size([1000, 700]).nodes(nodes).links(edges.map(([s, t]) => ({ source: s, target: t })));
+  layout.start(0, 0, 0, 0, false);
+  await clock.busy();
+  // What `resume()` does, without its run to convergence in one call.
+  layout._alpha = 0.1;
+  layout._running = true;
+  let steps = 0;
+  let converged = false;
+  while (!converged && clock.ms() < BUDGET_MS) {
+    converged = layout.tick();
+    if (!converged) steps++;
+    await clock.busy();
+  }
+  return { engine: "WebCola", finished: converged, ms: clock.ms(), steps, pos: nodes.map((d: any) => ({ x: d.x, y: d.y })) };
+}
+
 // ---- Quality
 
 async function quality(pos: Pos, edges: Edges) {
@@ -185,7 +255,18 @@ describe("layout engines on QuickJS", () => {
     test(id, async () => {
       const { edges } = load(id);
       const ours = await runNshGraph(id);
-      const results: Result[] = [ours, await runD3Same(id, ours.radii), await runD3Default(id), await runFA2(id)];
+      const results: Result[] = [
+        ours,
+        await runD3Same(id, ours.radii),
+        await runD3Default(id),
+        await runFA2(id),
+        await runAntV(id, "force"),
+        await runAntV(id, "fruchterman"),
+      ];
+      // WebCola's setup (all-pairs shortest paths) is one call that can't be split. On the 1500-node graph it runs
+      // past NSH's 2 s limit and NSH interrupts the test, so there it is reported as unable to run.
+      const colaRuns = load(id).n <= COLA_MAX_NODES;
+      if (colaRuns) results.push(await runCola(id));
       for (const r of results) {
         const q = await quality(r.pos, edges);
         const row = (
@@ -200,6 +281,11 @@ describe("layout engines on QuickJS", () => {
             r.finished === false ? "stopped at budget" : "",
           ].join(" | ")
         );
+        rows.push(row);
+        console.log(row);
+      }
+      if (!colaRuns) {
+        const row = [id.padEnd(11), "WebCola".padEnd(25), "can't run: its setup is one call past NSH's 2 s limit"].join(" | ");
         rows.push(row);
         console.log(row);
       }

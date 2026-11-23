@@ -244,8 +244,10 @@ positions between JS objects and Rust, and most of the rest is the many-body for
 
 [docs/comparison.md](docs/comparison.md) compares nsh-graph with gpui-graph, Neo4j NVL, Cytoscape.js, sigma.js,
 AntV G6, vis-network, ECharts and d3-force, feature by feature. It also has layout benchmarks run inside NSH's
-runtime (`nsh test bench`). With the same forces, nsh-graph matches d3-force's layout quality at 2–4.5× the
-speed; ForceAtlas2 crosses fewer edges, nsh-graph spaces edges more evenly.
+runtime (`nsh test bench`), against d3-force, ForceAtlas2, AntV G6's force and Fruchterman layouts
+(@antv/layout) and WebCola. With the same forces, nsh-graph matches d3-force's layout quality at 2.3–4.7× the
+speed, and it lays out 2–6× faster than AntV's layouts with fewer edge crossings (AntV force has 2–2.3× as
+many). ForceAtlas2 crosses fewer edges, and WebCola piles up fewer nodes but is far slower.
 
 ## Datasets and gallery
 
@@ -267,7 +269,7 @@ nsh test example/input.test.tsx --target windows   # input on a real host (or ma
 
 nsh run perf                    # 1500 to 10000 nodes, TypeScript or Rust (builds the crate)
 nsh test perf                   # TypeScript and Rust side by side: tick, settle, draw, layout quality
-nsh test bench                  # nsh-graph against d3-force and ForceAtlas2 (docs/comparison.md)
+nsh test bench                  # nsh-graph against d3-force, ForceAtlas2, AntV and WebCola (docs/comparison.md)
 cargo test                      # the Rust crate on its own
 ```
 
