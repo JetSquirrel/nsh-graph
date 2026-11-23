@@ -4,8 +4,9 @@
   "version": "0.0.0",
   "build": 1,
   "nsh": ">=0.6",
-  "rust": ["../native"],
-  "resolve": {
-    "alias": { "nsh-graph": "../src/index.ts" }
+  "dependencies": {
+    "nsh-graph": {
+      "path": ".."
+    }
   }
 }

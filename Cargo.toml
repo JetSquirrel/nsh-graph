@@ -1,0 +1,27 @@
+[package]
+name = "nsh-graph"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "An interactive network graph view for Native Shell (NSH): TSX components with the force layout and painting in Rust"
+repository = "https://github.com/JetSquirrel/nsh-graph"
+homepage = "https://jetsquirrel.github.io/nsh-graph/"
+readme = "README.md"
+keywords = ["nshm", "nsh", "graph", "network", "force-directed"]
+categories = ["visualization", "gui"]
+# The nshm: the TSX the app imports as "nsh-graph" (nsh.json "exports") and the Rust module it imports
+# as "nsh-graph/native". The examples, benchmarks, datasets and site stay out of the package.
+include = ["/Cargo.toml", "/nsh.json", "/README.md", "/LICENSE", "/src/**/*.ts", "/src/**/*.tsx", "/native/src/**/*.rs"]
+
+# Built on its own, not as part of an app's workspace.
+[workspace]
+
+[lib]
+path = "native/src/lib.rs"
+
+[dependencies]
+nsh-core = "0.6.0"
+
+[profile.dev]
+# The layout runs every frame: even debug builds need it optimized.
+opt-level = 2

@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "packages": [
+    {
+      "name": "nsh-graph",
+      "version": "0.1.0",
+      "path": "..",
+      "module": "nsh-graph/native",
+      "exports": {
+        "nsh-graph": "src/index.ts"
+      }
+    }
+  ]
+}
