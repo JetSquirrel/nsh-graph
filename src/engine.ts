@@ -461,9 +461,9 @@ export class GraphEngine {
 
   /** On the first load, settle the roughest part of the layout before the first frame. */
   private warmUp() {
-    // A TypeScript tick costs about 0.055 ms per node on QuickJS: past ~1000 nodes even the first one would
-    // overrun the budget and hold the first frame (a 5000-node tick takes a quarter of a second or more).
-    if (!this.sim.isNative && this.nodes.length * 0.055 > WARM_UP_MS) return;
+    // A TypeScript tick costs about 0.03 ms per node on QuickJS: past ~2000 nodes even the first one would
+    // overrun the budget and hold the first frame (a 5000-node tick takes 150 ms or more).
+    if (!this.sim.isNative && this.nodes.length * 0.03 > WARM_UP_MS) return;
     const start = now();
     while (this.sim.alpha > 0.35 && now() - start < WARM_UP_MS) this.sim.tick();
     this.geometryVersion++;
@@ -611,7 +611,7 @@ export class GraphEngine {
 
   /** minZoom, or less when the graph only fits further out. */
   private minZoomNow(): number {
-    const fit = this.fitViewport(this.nodes.map((n) => ({ x: n.x, y: n.y })));
+    const fit = this.fitViewport(this.nodes);
     return fit ? Math.min(this.options.minZoom, fit.k * 0.8) : this.options.minZoom;
   }
 
@@ -633,7 +633,7 @@ export class GraphEngine {
   /** Fits the whole graph in view; the viewport then follows the layout again until the user moves it. */
   fit(animated = true) {
     this.autoFit = true;
-    this.fitTo(this.nodes.map((n) => ({ x: n.x, y: n.y })), animated);
+    this.fitTo(this.nodes, animated);
   }
 
   /** Fits these nodes in view (the rest of the graph may fall outside); the view stops following the layout. */
@@ -665,17 +665,19 @@ export class GraphEngine {
     }
   }
 
+  /** The viewport that fits `points`: often the nodes themselves, every frame while the layout runs. */
   private fitViewport(points: Positions, radii?: number[]): Viewport | null {
     if (this.width <= 0 || this.height <= 0 || points.length === 0) return null;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    points.forEach((p, i) => {
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
       const r = (radii ? radii[i] : this.nodes[i]?.r) ?? 0;
-      if (Number.isNaN(p.x)) return;
+      if (Number.isNaN(p.x)) continue;
       x0 = Math.min(x0, p.x - r);
       y0 = Math.min(y0, p.y - r);
       x1 = Math.max(x1, p.x + r);
       y1 = Math.max(y1, p.y + r);
-    });
+    }
     if (!Number.isFinite(x0)) return null;
     const pad = this.options.fitPadding;
     const w = Math.max(1, x1 - x0);
@@ -692,7 +694,7 @@ export class GraphEngine {
   /** While the layout runs, glide toward the fitted viewport. */
   private followLayout() {
     if (this.viewTween) return;
-    const v = this.fitViewport(this.nodes.map((n) => ({ x: n.x, y: n.y })));
+    const v = this.fitViewport(this.nodes);
     if (!v) return;
     const s = this.options.reduceMotion ? 1 : 0.18;
     // Zoom out promptly, zoom in only slowly, so the view does not pump.

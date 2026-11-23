@@ -28,6 +28,8 @@ export interface SimLink {
   target: number;
 }
 
+const sqrt = Math.sqrt;
+
 export const DEFAULT_FORCE: ForceConfig = {
   linkDistance: 90,
   charge: -320,
@@ -65,8 +67,11 @@ export class ForceSimulation {
   private manyBody = new ManyBody();
   private collider = new Collider();
   private jiggler = () => this.jiggle();
-  private linkStrength: number[] = [];
-  private linkBias: number[] = [];
+  /** Per link: its ends' node indices, strength and bias, read by the link force every tick. */
+  private linkSource = new Int32Array(0);
+  private linkTarget = new Int32Array(0);
+  private linkStrength = new Float64Array(0);
+  private linkBias = new Float64Array(0);
   /** The Rust layout the ticks run on, when `setNativeBackend` registered one; null runs them here. */
   private native: NativeForceLayout | null = null;
   private state = new Float64Array(0);
@@ -103,8 +108,17 @@ export class ForceSimulation {
       count[l.source]++;
       count[l.target]++;
     }
-    this.linkStrength = links.map((l) => 1 / Math.max(1, Math.min(count[l.source], count[l.target])));
-    this.linkBias = links.map((l) => count[l.source] / Math.max(1, count[l.source] + count[l.target]));
+    const m = links.length;
+    this.linkSource = new Int32Array(m);
+    this.linkTarget = new Int32Array(m);
+    this.linkStrength = new Float64Array(m);
+    this.linkBias = new Float64Array(m);
+    links.forEach((l, i) => {
+      this.linkSource[i] = l.source;
+      this.linkTarget[i] = l.target;
+      this.linkStrength[i] = 1 / Math.max(1, Math.min(count[l.source], count[l.target]));
+      this.linkBias[i] = count[l.source] / Math.max(1, count[l.source] + count[l.target]);
+    });
   }
 
   setConfig(config: Partial<ForceConfig>) {
@@ -133,13 +147,13 @@ export class ForceSimulation {
 
   /** `iterations` ticks in Rust: the nodes' state goes over in one buffer and comes back in another. */
   private tickNative(iterations: number) {
-    const nodes = this.nodes;
-    const n = nodes.length;
+    // `var`s in the copying loops, for QuickJS: see the note in quadtree.ts.
+    var nodes = this.nodes, n = nodes.length, i = 0, b = 0, node: SimNode;
     if (this.state.length !== n * 7) this.state = new Float64Array(n * 7);
-    const s = this.state;
-    for (let i = 0; i < n; i++) {
-      const node = nodes[i];
-      const b = i * 7;
+    var s = this.state;
+    for (i = 0; i < n; i++) {
+      node = nodes[i];
+      b = i * 7;
       s[b] = node.x;
       s[b + 1] = node.y;
       s[b + 2] = node.vx;
@@ -152,10 +166,10 @@ export class ForceSimulation {
     if (bytes.byteLength < (n * 6 + 1) * 8) throw new Error(`ForceLayout.tick returned ${bytes.byteLength} bytes for ${n} nodes`);
     // A Float64Array needs its offset aligned to 8: copy when it is not.
     const aligned = bytes.byteOffset % 8 === 0 ? bytes : bytes.slice();
-    const out = new Float64Array(aligned.buffer, aligned.byteOffset, n * 6 + 1);
-    for (let i = 0; i < n; i++) {
-      const node = nodes[i];
-      const b = i * 6;
+    var out = new Float64Array(aligned.buffer, aligned.byteOffset, n * 6 + 1);
+    for (i = 0; i < n; i++) {
+      node = nodes[i];
+      b = i * 6;
       node.x = out[b];
       node.y = out[b + 1];
       node.vx = out[b + 2];
@@ -195,29 +209,45 @@ export class ForceSimulation {
       this.applyGravity();
       if (c.groupStrength > 0) this.applyGroups();
       this.applyCollide();
-      const keep = 1 - c.velocityDecay;
-      for (const n of this.nodes) {
-        if (n.fx !== null) {
-          n.x = n.fx;
-          n.vx = 0;
-        } else {
-          n.vx *= keep;
-          n.x += n.vx;
-        }
-        if (n.fy !== null) {
-          n.y = n.fy;
-          n.vy = 0;
-        } else {
-          n.vy *= keep;
-          n.y += n.vy;
-        }
-        // One bad number would spread to every node through the forces: put the node back instead.
-        if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) {
-          n.x = (this.random() - 0.5) * 100;
-          n.y = (this.random() - 0.5) * 100;
-          n.vx = n.vy = 0;
-          if (n.fx !== null) { n.fx = n.x; n.fy = n.y; }
-        }
+      this.integrate();
+    }
+  }
+
+  // The per-node and per-link loops below use `var`s, for QuickJS: see the note in quadtree.ts.
+
+  /** Moves the nodes by their decayed velocities (pinned ones stay on their pins). */
+  private integrate() {
+    var nodes = this.nodes, count = nodes.length, keep = 1 - this.config.velocityDecay;
+    var i = 0, x = 0, y = 0, v = 0, pin: number | null = null, n: SimNode;
+    for (i = 0; i < count; i++) {
+      n = nodes[i];
+      pin = n.fx;
+      if (pin !== null) {
+        x = pin;
+        n.vx = 0;
+      } else {
+        v = n.vx * keep;
+        n.vx = v;
+        x = n.x + v;
+      }
+      n.x = x;
+      pin = n.fy;
+      if (pin !== null) {
+        y = pin;
+        n.vy = 0;
+      } else {
+        v = n.vy * keep;
+        n.vy = v;
+        y = n.y + v;
+      }
+      n.y = y;
+      // One bad number would spread to every node through the forces: put the node back instead.
+      // (x - x is 0 for every finite x, NaN for NaN and ±Infinity: a test without a call.)
+      if (x - x !== 0 || y - y !== 0) {
+        n.x = (this.random() - 0.5) * 100;
+        n.y = (this.random() - 0.5) * 100;
+        n.vx = n.vy = 0;
+        if (n.fx !== null) { n.fx = n.x; n.fy = n.y; }
       }
     }
   }
@@ -227,20 +257,20 @@ export class ForceSimulation {
   }
 
   private applyLinks() {
-    const { nodes, links, alpha } = this;
-    const base = this.config.linkDistance;
-    for (let i = 0; i < links.length; i++) {
-      const s = nodes[links[i].source];
-      const t = nodes[links[i].target];
+    var nodes = this.nodes, alpha = this.alpha, base = this.config.linkDistance;
+    var source = this.linkSource, target = this.linkTarget, strength = this.linkStrength, bias = this.linkBias;
+    var count = source.length, i = 0, x = 0, y = 0, l = 0, b = 0, s: SimNode, t: SimNode;
+    for (i = 0; i < count; i++) {
+      s = nodes[source[i]];
+      t = nodes[target[i]];
       if (s === t) continue;
-      let x = t.x + t.vx - s.x - s.vx || this.jiggle();
-      let y = t.y + t.vy - s.y - s.vy || this.jiggle();
-      let l = Math.sqrt(x * x + y * y);
-      const distance = base + (s.r + t.r) * 0.5;
-      l = ((l - distance) / l) * alpha * this.linkStrength[i];
+      x = t.x + t.vx - s.x - s.vx || this.jiggle();
+      y = t.y + t.vy - s.y - s.vy || this.jiggle();
+      l = sqrt(x * x + y * y);
+      l = ((l - (base + (s.r + t.r) * 0.5)) / l) * alpha * strength[i];
       x *= l;
       y *= l;
-      const b = this.linkBias[i];
+      b = bias[i];
       t.vx -= x * b;
       t.vy -= y * b;
       s.vx += x * (1 - b);
@@ -264,9 +294,11 @@ export class ForceSimulation {
   }
 
   private applyGravity() {
-    const g = this.config.gravity * this.alpha;
+    var g = this.config.gravity * this.alpha;
     if (g === 0) return;
-    for (const n of this.nodes) {
+    var nodes = this.nodes, count = nodes.length, i = 0, n: SimNode;
+    for (i = 0; i < count; i++) {
+      n = nodes[i];
       n.vx -= n.x * g;
       n.vy -= n.y * g;
     }
