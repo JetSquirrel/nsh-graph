@@ -1,7 +1,8 @@
 # nsh-graph
 
-An interactive network graph view for [Native Shell (NSH)](https://nsh.dev), written in TSX. It draws on NSH's
-native `<Canvas>`, so it runs on every NSH platform: iOS, Android, macOS, Windows, Linux, GPUI, and the web.
+An interactive network graph view for [Native Shell (NSH)](https://nsh.dev), written in TSX, with an optional Rust
+backend for large graphs. It draws on NSH's native `<Canvas>`, so it runs on every NSH platform: iOS, Android, macOS,
+Windows, Linux, GPUI, and the web. It ships as an [nshm](#install): `nsh add nsh-graph`.
 
 **[Live demo and showcase →](https://jetsquirrel.github.io/nsh-graph/)** ([gallery](https://jetsquirrel.github.io/nsh-graph/gallery/))
 
