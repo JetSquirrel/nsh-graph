@@ -55,6 +55,8 @@ export interface RenderTheme {
 
 const DIM = 0.18;
 const widthCache = new Map<string, number>();
+/** Scratch space for `renderGraph`: the straight edges' arrow tips (x, y and angle per edge). */
+let tipBuffer = new Float64Array(0);
 
 function measure(cx: Ctx2D, font: string, text: string): number {
   const key = font + "\u0000" + text;
@@ -67,8 +69,23 @@ function measure(cx: Ctx2D, font: string, text: string): number {
   return w;
 }
 
+/** `truncate`'s results by `max`, then text: captions are truncated again every frame. */
+const truncated = new Map<number, Map<string, string>>();
+
 /** One line of at most `max` characters: control characters become spaces, and it never cuts a character in half. */
 export function truncate(text: string, max = 28): string {
+  let cache = truncated.get(max);
+  if (!cache) truncated.set(max, (cache = new Map()));
+  let line = cache.get(text);
+  if (line === undefined) {
+    if (cache.size > 4000) cache.clear();
+    line = truncateLine(text, max);
+    cache.set(text, line);
+  }
+  return line;
+}
+
+function truncateLine(text: string, max: number): string {
   const line = text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
   if (line.length <= max) return line;
   const chars = Array.from(line);
@@ -124,8 +141,16 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   const vy0 = -ty / k - margin;
   const vx1 = (width - tx) / k + margin;
   const vy1 = (height - ty) / k + margin;
-  const visible = (x: number, y: number) => x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1;
-  const edgeVisible = (i: number) => engine.edgeMayTouch(i, vx0, vy0, vx1, vy1);
+  // Which nodes are in view. An edge with an end in view is too (`edgeMayTouch` says so for it), so only
+  // edges with both ends out need the closer test.
+  const inView = new Uint8Array(nodes.length);
+  for (let i = 0; i < nodes.length; i++) {
+    const x = nodes[i].x;
+    const y = nodes[i].y;
+    if (x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1) inView[i] = 1;
+  }
+  const edgeVisible = (i: number) =>
+    inView[edges[i].source] === 1 || inView[edges[i].target] === 1 || engine.edgeMayTouch(i, vx0, vy0, vx1, vy1);
   const shape = (i: number) => engine.edgeShape(i);
 
   cx.save();
@@ -188,17 +213,57 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
     else if (s.c) cx.quadraticCurveTo(s.c.x, s.c.y, bx, by);
     else cx.lineTo(bx, by);
   };
-  const traceArrow = (s: EdgeShape, i: number) => {
-    const len = arrowLen(edgeWidth(i));
-    const a = s.endAngle;
+  /** An arrow head with its tip at (x, y), pointing along angle `a`. */
+  const arrowAt = (x: number, y: number, a: number, len: number) => {
     const spread = 0.42;
-    cx.moveTo(s.b.x, s.b.y);
-    cx.lineTo(s.b.x - Math.cos(a - spread) * len, s.b.y - Math.sin(a - spread) * len);
-    cx.lineTo(s.b.x - Math.cos(a + spread) * len, s.b.y - Math.sin(a + spread) * len);
+    cx.moveTo(x, y);
+    cx.lineTo(x - Math.cos(a - spread) * len, y - Math.sin(a - spread) * len);
+    cx.lineTo(x - Math.cos(a + spread) * len, y - Math.sin(a + spread) * len);
     cx.closePath();
   };
+  const traceArrow = (s: EdgeShape, i: number) => arrowAt(s.b.x, s.b.y, s.endAngle, arrowLen(edgeWidth(i)));
 
   const arrows = options.arrows && arrowLen(1.5) * k >= 3.5;
+  if (arrows && tipBuffer.length < edges.length * 3) tipBuffer = new Float64Array(edges.length * 3);
+  const tips = tipBuffer;
+  /**
+   * Traces edge i's line, stopped `back` short of its tip under an arrow. A straight edge (most are) is
+   * traced as `edgeShape` and `tracePath` would, without building its shape: on QuickJS that is most of
+   * what drawing an edge costs. Its tip and angle go to `tips`, for `traceHead`.
+   */
+  const traceLine = (i: number, back: number) => {
+    const e = edges[i];
+    if (e.self || e.bend !== 0) return tracePath(shape(i), i);
+    const s = nodes[e.source];
+    const t = nodes[e.target];
+    const dx = t.x - s.x;
+    const dy = t.y - s.y;
+    const len = Math.hypot(dx, dy) || 1e-6;
+    const ux = dx / len;
+    const uy = dy / len;
+    let bx = t.x - ux * t.r;
+    let by = t.y - uy * t.r;
+    if (arrows) {
+      const a = Math.atan2(dy, dx);
+      tips[i * 3] = bx;
+      tips[i * 3 + 1] = by;
+      tips[i * 3 + 2] = a;
+      bx -= Math.cos(a) * back;
+      by -= Math.sin(a) * back;
+    }
+    cx.moveTo(s.x + ux * s.r, s.y + uy * s.r);
+    cx.lineTo(bx, by);
+  };
+  /** Traces edge i's arrow head, `len` long, after `traceLine` traced its line. */
+  const traceHead = (i: number, len: number) => {
+    const e = edges[i];
+    if (e.self || e.bend !== 0) traceArrow(shape(i), i);
+    else arrowAt(tips[i * 3], tips[i * 3 + 1], tips[i * 3 + 2], len);
+  };
+  // The batched edges all have the default width, so the same arrow.
+  const batchArrow = arrowLen(Math.max(1.5, 0.75 * px));
+  const batchBack = batchArrow * 0.7;
+
   // Edges with a color or width of their own are drawn one by one; the others share a path per pass.
   const customs = engine.customEdges;
   let traced: string[] | null = null;
@@ -225,14 +290,15 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
     for (const i of customs) {
       if (states[i] !== pass || !edgeVisible(i)) continue;
       const e = edges[i].edge;
+      const len = arrowLen(edgeWidth(i));
       cx.beginPath();
-      tracePath(shape(i), i);
+      traceLine(i, len * 0.7);
       cx.strokeStyle = pass === 2 && !e.color ? color : (e.color ?? color);
       cx.lineWidth = edgeWidth(i) * (pass === 2 ? 1.4 : 1);
       cx.stroke();
       if (arrows) {
         cx.beginPath();
-        traceArrow(shape(i), i);
+        traceHead(i, len);
         cx.fillStyle = cx.strokeStyle;
         cx.fill();
       }
@@ -254,13 +320,13 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
     const batch = batches[pass];
     if (batch.length === 0) continue;
     cx.beginPath();
-    for (const i of batch) tracePath(shape(i), i);
+    for (const i of batch) traceLine(i, batchBack);
     cx.strokeStyle = color;
     cx.lineWidth = Math.max(1.5, 0.75 * px) * (pass === 2 ? 1.4 : 1);
     cx.stroke();
     if (arrows) {
       cx.beginPath();
-      for (const i of batch) traceArrow(shape(i), i);
+      for (const i of batch) traceHead(i, batchArrow);
       cx.fillStyle = color;
       cx.fill();
     }
@@ -277,13 +343,11 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   const keys = native ? new Uint32Array(nodes.length) : null;
   const members: number[][] | null = native ? null : Array.from({ length: nb }, () => []);
   for (let i = 0; i < nodes.length; i++) {
-    const n = nodes[i];
-    const x = n.x;
-    const y = n.y;
-    if (!(x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1)) {
+    if (inView[i] === 0) {
       if (keys) keys[i] = 0xffffffff;
       continue;
     }
+    const n = nodes[i];
     const b = (focus !== null && !focus.nodes.has(i) ? 0 : nc) + rank[i];
     if (keys) keys[i] = b;
     else members![b].push(i);
@@ -322,7 +386,7 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
     if (!selNodes.has(i) && i !== hoverNode && n.fx === null) continue;
-    if (!visible(n.x, n.y)) continue;
+    if (inView[i] === 0) continue;
     if (selNodes.has(i)) {
       cx.beginPath();
       cx.arc(n.x, n.y, n.r + 3.5 * px, 0, Math.PI * 2);
@@ -376,22 +440,27 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   const auto = options.labelMode === "auto";
   const emphasized = (i: number) => selNodes.has(i) || i === hoverNode || (focus !== null && focus.nodes.has(i));
   const onScreen: number[] = [];
-  const order: number[] = [];
-  const priority = new Map<number, number>();
+  // The captions by priority, highest first, in node order within one. Nodes are grouped by priority and only
+  // the priorities are sorted: there are few (a node's radius comes from its degree), and on QuickJS a sort of
+  // every node with a comparator took longer than the rest of the frame.
+  const byPriority = new Map<number, number[]>();
   const emphasizedAny = selNode >= 0 || hoverNode >= 0 || focus !== null;
   const anyCaption = options.labelMode !== "never" && (!auto || emphasizedAny || maxR * k >= 9);
   if (anyCaption || options.edgeLabels) {
     for (let i = 0; i < nodes.length; i++) {
-      if (!visible(nodes[i].x, nodes[i].y)) continue;
+      if (inView[i] === 0) continue;
       onScreen.push(i);
       if (!anyCaption) continue;
       const strong = emphasized(i);
       if (auto && (focus !== null ? !strong : nodes[i].r * k < 9 && !strong)) continue;
-      order.push(i);
-      priority.set(i, (strong ? 1e6 : 0) + nodes[i].r);
+      const priority = (strong ? 1e6 : 0) + nodes[i].r;
+      const group = byPriority.get(priority);
+      if (group) group.push(i);
+      else byPriority.set(priority, [i]);
     }
   }
-  order.sort((a, b) => priority.get(b)! - priority.get(a)! || a - b);
+  const order: number[] = [];
+  for (const priority of [...byPriority.keys()].sort((a, b) => b - a)) for (const i of byPriority.get(priority)!) order.push(i);
   // More captions than this cannot be read anyway; the busiest nodes keep theirs.
   if (auto && order.length > 300) order.length = 300;
   const occupied = new RectGrid(48);
@@ -512,25 +581,35 @@ class RectGrid {
   private cells = new Map<number, Rect[]>();
   constructor(private size: number) {}
 
-  private each(r: Rect, fn: (key: number) => boolean | void): boolean {
-    const s = this.size;
-    for (let cx = Math.floor(r.x0 / s); cx <= Math.floor(r.x1 / s); cx++)
-      for (let cy = Math.floor(r.y0 / s); cy <= Math.floor(r.y1 / s); cy++) if (fn(((cx & 0xffff) << 16) | (cy & 0xffff))) return true;
-    return false;
-  }
-
+  // Every rect is added and tested once per frame, so these loop inline rather than through callbacks.
   add(r: Rect) {
-    this.each(r, (key) => {
-      const cell = this.cells.get(key);
-      if (cell) cell.push(r);
-      else this.cells.set(key, [r]);
-    });
+    const s = this.size;
+    const cx1 = Math.floor(r.x1 / s);
+    const cy0 = Math.floor(r.y0 / s);
+    const cy1 = Math.floor(r.y1 / s);
+    for (let cx = Math.floor(r.x0 / s); cx <= cx1; cx++) {
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const key = ((cx & 0xffff) << 16) | (cy & 0xffff);
+        const cell = this.cells.get(key);
+        if (cell) cell.push(r);
+        else this.cells.set(key, [r]);
+      }
+    }
   }
 
   hits(r: Rect): boolean {
-    return this.each(r, (key) =>
-      (this.cells.get(key) ?? []).some((o) => o.owner !== r.owner && o.x0 < r.x1 && o.x1 > r.x0 && o.y0 < r.y1 && o.y1 > r.y0),
-    );
+    const s = this.size;
+    const cx1 = Math.floor(r.x1 / s);
+    const cy0 = Math.floor(r.y0 / s);
+    const cy1 = Math.floor(r.y1 / s);
+    for (let cx = Math.floor(r.x0 / s); cx <= cx1; cx++) {
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const cell = this.cells.get(((cx & 0xffff) << 16) | (cy & 0xffff));
+        if (!cell) continue;
+        for (const o of cell) if (o.owner !== r.owner && o.x0 < r.x1 && o.x1 > r.x0 && o.y0 < r.y1 && o.y1 > r.y0) return true;
+      }
+    }
+    return false;
   }
 }
 

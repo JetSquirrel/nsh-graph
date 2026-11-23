@@ -375,20 +375,20 @@
   <section id="performance">
     <div class="wrap">
       <h2>Fast where it counts: on QuickJS</h2>
-      <p class="sub">NSH runs TSX on QuickJS everywhere except the web. nsh-graph's typed-array quadtree allocates nothing per tick, so with the same forces it matches d3-force's layout quality at 2.3–4.7× the speed, and it lays out 2–6× faster than AntV G6's layouts. For large graphs, the opt-in Rust backend ticks and draws natively: 5,000 nodes settle in about 4 s instead of minutes.</p>
+      <p class="sub">NSH runs TSX on QuickJS everywhere except the web. nsh-graph's typed-array quadtree allocates nothing per tick, and its loops are written for an interpreter, so with the same forces it matches d3-force's layout quality at 3.8–8.3× the speed, and it lays out 3–12× faster than AntV G6's layouts. For large graphs, the opt-in Rust backend ticks and draws natively: 5,000 nodes settle in about 4 s instead of minutes.</p>
       <div class="bench">
         <div class="card">
           <h3 style="margin-top:0">Time to a finished layout</h3>
           <p>Flare imports, 220 nodes / 764 edges, inside NSH's QuickJS runtime. Lower is better.</p>
-          <div class="bars" role="img" aria-label="nsh-graph 3.8 s, d3-force defaults 6.6 s, ForceAtlas2 6.8 s, d3-force same forces 10.3 s, AntV force 20.2 s, AntV Fruchterman 23.3 s">
-            <div class="bar-row"><span class="lbl me">nsh-graph</span><div class="track"><div class="fill me" style="width:16.3%"><span>3.8 s</span></div></div></div>
-            <div class="bar-row"><span class="lbl">d3-force, defaults</span><div class="track"><div class="fill" style="width:28.3%"><span>6.6 s</span></div></div></div>
-            <div class="bar-row"><span class="lbl">ForceAtlas2</span><div class="track"><div class="fill" style="width:29.2%"><span>6.8 s</span></div></div></div>
-            <div class="bar-row"><span class="lbl">d3-force, same forces</span><div class="track"><div class="fill" style="width:44.2%"><span>10.3 s</span></div></div></div>
-            <div class="bar-row"><span class="lbl">AntV force (G6)</span><div class="track"><div class="fill" style="width:86.7%"><span>20.2 s</span></div></div></div>
-            <div class="bar-row"><span class="lbl">AntV Fruchterman</span><div class="track"><div class="fill" style="width:100%"><span>23.3 s</span></div></div></div>
+          <div class="bars" role="img" aria-label="nsh-graph 2.0 s, d3-force defaults 6.5 s, ForceAtlas2 6.8 s, d3-force same forces 10.3 s, AntV force 19.2 s, AntV Fruchterman 23.5 s">
+            <div class="bar-row"><span class="lbl me">nsh-graph</span><div class="track"><div class="fill me" style="width:8.5%"><span>2.0 s</span></div></div></div>
+            <div class="bar-row"><span class="lbl">d3-force, defaults</span><div class="track"><div class="fill" style="width:27.7%"><span>6.5 s</span></div></div></div>
+            <div class="bar-row"><span class="lbl">ForceAtlas2</span><div class="track"><div class="fill" style="width:28.9%"><span>6.8 s</span></div></div></div>
+            <div class="bar-row"><span class="lbl">d3-force, same forces</span><div class="track"><div class="fill" style="width:43.8%"><span>10.3 s</span></div></div></div>
+            <div class="bar-row"><span class="lbl">AntV force (G6)</span><div class="track"><div class="fill" style="width:81.7%"><span>19.2 s</span></div></div></div>
+            <div class="bar-row"><span class="lbl">AntV Fruchterman</span><div class="track"><div class="fill" style="width:100%"><span>23.5 s</span></div></div></div>
           </div>
-          <p class="note">WebCola didn't finish within the 120 s budget. On 1,500 nodes nsh-graph finishes in 23 s, d3-force and ForceAtlas2 in 76–109 s, and AntV's layouts not within 120 s. Full method and quality scores in <a href="https://github.com/JetSquirrel/nsh-graph/blob/main/docs/comparison.md">docs/comparison.md</a>.</p>
+          <p class="note">WebCola didn't finish within the 120 s budget. On 1,500 nodes nsh-graph finishes in 12 s, d3-force and ForceAtlas2 in 66–96 s, and AntV's layouts not within 120 s. Full method and quality scores in <a href="https://github.com/JetSquirrel/nsh-graph/blob/main/docs/comparison.md">docs/comparison.md</a>.</p>
         </div>
         <div class="card">
           <h3 style="margin-top:0">JS time per frame</h3>
@@ -396,11 +396,11 @@
           <table>
             <thead><tr><th>Graph</th><th class="num">Tick</th><th class="num">Draw</th><th class="num">Settles</th></tr></thead>
             <tbody>
-              <tr><td>Karate club · 34 / 78</td><td class="num">1.2 ms</td><td class="num">1.6 ms</td><td class="num">0.4 s</td></tr>
-              <tr><td>Les Misérables · 77 / 254</td><td class="num">3.6 ms</td><td class="num">5 ms</td><td class="num">1.1 s</td></tr>
-              <tr><td>Flare imports · 220 / 764</td><td class="num">14 ms</td><td class="num">16 ms</td><td class="num">3.9 s</td></tr>
-              <tr><td>Star · 301 / 300</td><td class="num">18 ms</td><td class="num">13 ms</td><td class="num">5.8 s</td></tr>
-              <tr><td>Scale-free · 1500 / 2997</td><td class="num">80 ms</td><td class="num">30 ms</td><td class="num">22 s</td></tr>
+              <tr><td>Karate club · 34 / 78</td><td class="num">0.7 ms</td><td class="num">1 ms</td><td class="num">0.2 s</td></tr>
+              <tr><td>Les Misérables · 77 / 254</td><td class="num">2.1 ms</td><td class="num">2.6 ms</td><td class="num">0.5 s</td></tr>
+              <tr><td>Flare imports · 220 / 764</td><td class="num">7 ms</td><td class="num">4 ms</td><td class="num">1.9 s</td></tr>
+              <tr><td>Star · 301 / 300</td><td class="num">10 ms</td><td class="num">5 ms</td><td class="num">2.8 s</td></tr>
+              <tr><td>Scale-free · 1500 / 2997</td><td class="num">42 ms</td><td class="num">8 ms</td><td class="num">12 s</td></tr>
             </tbody>
           </table>
           <p class="note">A live force layout stays smooth up to a few hundred nodes. Past that, use a static layout or starting positions.</p>
