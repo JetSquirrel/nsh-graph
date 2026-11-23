@@ -33,3 +33,17 @@ test("dragging the background pans and zooming buttons change the zoom", async (
   await app.drag("id:graph", { x: 120, y: 40 });
   expect(app.shows("id:graph")).toBe(true);
 });
+
+test("the Reset view button over the graph brings a zoomed-in view back", async () => {
+  const app = await open("./App.tsx", { width: 1100, height: 760 });
+  await app.press("id:opt-grid");
+  await app.wait(800);
+  const zoom = () => app.texts().find((t) => /^\d+%/.test(t)) ?? "";
+  const fitted = zoom();
+  for (let i = 0; i < 4; i++) await app.press("text:Zoom in");
+  await app.wait(500);
+  expect(zoom()).not.toBe(fitted);
+  await app.press("id:reset-view");
+  await app.wait(600);
+  expect(zoom()).toBe(fitted);
+});

@@ -112,27 +112,33 @@ function App() {
       </View>
 
       <View style={{ flex: 1, flexDirection: wide() ? "row" : "column" }}>
-        <GraphView
-          data={data()}
-          controller={graph}
-          layout={layout()}
-          colorBy={colorBy()}
-          labelMode={labelMode()}
-          edgeLabels={edgeLabels()}
-          groupHulls={hulls()}
-          stickyDrag={sticky()}
-          accessibilityLabel="Film graph"
-          testID="graph"
-          onNodeActivate={(node) => expand(node.id)}
-          onContextMenu={(target) => {
-            if (target.kind === "node") {
-              const pinned = graph.isPinned(target.node.id);
-              graph.setPinned(target.node.id, !pinned);
-              status.set(`${pinned ? "Unpinned" : "Pinned"} ${target.node.caption}.`);
-            }
-          }}
-          style={{ flex: 1, minHeight: 280 }}
-        />
+        <View style={{ flex: 1, minHeight: 280 }}>
+          <GraphView
+            data={data()}
+            controller={graph}
+            layout={layout()}
+            colorBy={colorBy()}
+            labelMode={labelMode()}
+            edgeLabels={edgeLabels()}
+            groupHulls={hulls()}
+            stickyDrag={sticky()}
+            accessibilityLabel="Film graph"
+            testID="graph"
+            onNodeActivate={(node) => expand(node.id)}
+            onContextMenu={(target) => {
+              if (target.kind === "node") {
+                const pinned = graph.isPinned(target.node.id);
+                graph.setPinned(target.node.id, !pinned);
+                status.set(`${pinned ? "Unpinned" : "Pinned"} ${target.node.caption}.`);
+              }
+            }}
+            style={{ flex: 1 }}
+          />
+          {/* Always in reach on the canvas: one wheel turn or drag can leave the graph off screen. */}
+          <View style={{ position: "absolute", top: 12, right: 12 }}>
+            <Button label="Reset view" onPress={() => graph.fit()} testID="reset-view" />
+          </View>
+        </View>
         <View
           class="gap-3 border-border p-4"
           style={wide() ? { width: 300, borderLeftWidth: 1 } : { borderTopWidth: 1, maxHeight: 260 }}
