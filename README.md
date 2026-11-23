@@ -1,7 +1,8 @@
 # nsh-graph
 
-An interactive network graph view for [Native Shell (NSH)](https://nsh.dev), written in TSX. It draws on NSH's
-native `<Canvas>`, so it runs on every NSH platform: iOS, Android, macOS, Windows, Linux, GPUI, and the web.
+An interactive network graph view for [Native Shell (NSH)](https://nsh.dev), written in TSX, with an optional Rust
+backend for large graphs. It draws on NSH's native `<Canvas>`, so it runs on every NSH platform: iOS, Android, macOS,
+Windows, Linux, GPUI, and the web. It ships as an [nshm](#install): `nsh add nsh-graph`.
 
 **[Live demo and showcase →](https://jetsquirrel.github.io/nsh-graph/)** ([gallery](https://jetsquirrel.github.io/nsh-graph/gallery/))
 
@@ -142,6 +143,8 @@ TypeScript with no NSH imports. Use them to lay out graphs headless, or to draw 
 ## How it works
 
 ```
+nsh.json          the nshm: exports "nsh-graph" (src/index.ts)
+Cargo.toml        the crate: the Rust module "nsh-graph/native" (native/src/lib.rs)
 src/
   types.ts        data model and options
   simulation.ts   force simulation (link, charge, gravity, groups, alpha cooling)
@@ -154,6 +157,11 @@ src/
   controller.ts   imperative handle
   GraphView.tsx   the NSH component: canvas, frame loop, touch / mouse / wheel / pinch / keyboard
   GraphLegend.tsx legend component
+  native.ts       the optional Rust backend's interface and setNativeBackend
+native/src/
+  lib.rs          the native module: ForceLayout and GraphPainter, data in little-endian buffers
+  sim.rs          the force simulation, step for step the same as simulation.ts
+  paint.rs        edges and nodes traced as SVG path data, one path per batch
 ```
 
 The canvas records drawing operations and NSH replays them natively. While the layout is moving, a
@@ -210,8 +218,8 @@ setNativeBackend(native as unknown as NativeBackend);
 
 Views mounted after that use it. Without it, the TypeScript layout runs.
 
-NSH builds nshms from crates.io and Git optimized. A local checkout added with `nsh add --path` builds with the
-app's dev profile, about ten times slower. If you use one, add this to the app's `.cargo/config.toml`
+NSH's docs say nshms from crates.io and Git build optimized. A local checkout added with `nsh add --path` builds
+with the app's dev profile, about ten times slower. If you use one, add this to the app's `.cargo/config.toml`
 (this repository's covers `perf/`):
 
 ```toml
@@ -256,7 +264,19 @@ nsh run example --target web    # in a browser
 nsh check example               # type check (library + example)
 nsh test example                # headless tests: engine, layouts, datasets, regressions, UI, input
 nsh test example/input.test.tsx --target windows   # input on a real host (or macos, linux, web)
+
+nsh run perf                    # 1500 to 10000 nodes, TypeScript or Rust (builds the crate)
+nsh test perf                   # TypeScript and Rust side by side: tick, settle, draw, layout quality
+nsh test bench                  # nsh-graph against d3-force and ForceAtlas2 (docs/comparison.md)
+cargo test                      # the Rust crate on its own
 ```
+
+`example/` and `bench/` resolve `"nsh-graph"` to `src/` with an alias, so they run without Rust. `perf/` adds the
+package the way an app does (`"dependencies": { "nsh-graph": { "path": ".." } }`), so it also builds the crate.
+
+To release: bump `version` in `Cargo.toml`, then `cargo publish` and tag the same version
+(`git tag v0.1.1 && git push --tags`), which is what `nsh add github:JetSquirrel/nsh-graph` installs. Apps update
+with `nsh upgrade nsh-graph`.
 
 ## Roadmap
 

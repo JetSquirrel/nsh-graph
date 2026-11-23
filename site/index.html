@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nsh-graph · interactive network graphs for Native Shell</title>
-<meta name="description" content="An interactive network graph view for Native Shell (NSH), written in TSX. Force-directed, hierarchical, circular and grid layouts on a native canvas, on iOS, Android, desktop and the web.">
+<meta name="description" content="An interactive network graph view for Native Shell (NSH), shipped as an nshm: a TSX component with an opt-in Rust backend for large graphs. Force-directed, hierarchical, circular and grid layouts on a native canvas, on iOS, Android, desktop and the web.">
 <meta name="color-scheme" content="light dark">
 <meta property="og:title" content="nsh-graph">
-<meta property="og:description" content="Interactive network graphs for Native Shell: one TSX component, every platform.">
+<meta property="og:description" content="Interactive network graphs for Native Shell: one nshm, every platform.">
 <meta property="og:image" content="assets/og.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
@@ -252,9 +252,9 @@
       <div class="eyebrow">v0.1.0 · for Native Shell 0.6+ · Apache-2.0</div>
       <h1>Interactive network graphs, <em>native</em> on every platform.</h1>
       <p class="lede">
-        One TSX component for <a href="https://nsh.dev">Native Shell</a>. Force-directed, hierarchical, circular
-        and grid layouts, drawn on NSH's native canvas, with pan, zoom, drag, pinning and keyboard navigation.
-        No DOM, no dependencies.
+        A TSX component for <a href="https://nsh.dev">Native Shell</a>, with an opt-in Rust backend for large graphs.
+        Force-directed, hierarchical, circular and grid layouts, drawn on NSH's native canvas, with pan, zoom, drag,
+        multi-select, pinning and keyboard navigation. No DOM.
       </p>
       <div class="cta">
         <a class="btn primary" href="demo/">Open the live demo →</a>
@@ -375,7 +375,7 @@
   <section id="performance">
     <div class="wrap">
       <h2>Fast where it counts: on QuickJS</h2>
-      <p class="sub">NSH runs TSX on QuickJS everywhere except the web. nsh-graph's typed-array quadtree allocates nothing per tick, so with the same forces it matches d3-force's layout quality at 2–4.5× the speed.</p>
+      <p class="sub">NSH runs TSX on QuickJS everywhere except the web. nsh-graph's typed-array quadtree allocates nothing per tick, so with the same forces it matches d3-force's layout quality at 2–4.5× the speed. For large graphs, the opt-in Rust backend ticks and draws natively: 5,000 nodes settle in about 4 s instead of minutes.</p>
       <div class="bench">
         <div class="card">
           <h3 style="margin-top:0">Time to a finished layout</h3>
@@ -435,7 +435,7 @@
             <tr><td>Rendering</td><td>Native canvas</td><td>Canvas</td><td>WebGL</td><td>Canvas, SVG, WebGL</td><td class="n">none</td></tr>
             <tr><td>Layouts</td><td>force, hierarchical, circular, grid</td><td>many (+ ext.)</td><td>ForceAtlas2, circular</td><td>many</td><td>force</td></tr>
             <tr><td>Accessibility</td><td>keyboard, screen reader, reduced motion</td><td class="n">none built in</td><td class="n">none built in</td><td>some keyboard</td><td class="n">n/a</td></tr>
-            <tr><td>Dependencies</td><td>none</td><td>none</td><td>graphology</td><td>@antv/g…</td><td>3 d3 modules</td></tr>
+            <tr><td>Dependencies</td><td>none (nsh-core for Rust)</td><td>none</td><td>graphology</td><td>@antv/g…</td><td>3 d3 modules</td></tr>
           </tbody>
         </table>
       </div>
@@ -446,7 +446,7 @@
   <div class="closing">
     <div class="wrap">
       <h2>Drop a graph into your NSH app</h2>
-      <p class="sub" style="margin:0 auto 28px">Requires NSH 0.6 or later. NSH compiles the TSX source with your app.</p>
+      <p class="sub" style="margin:0 auto 28px">Requires NSH 0.6 or later. <code>nsh add nsh-graph</code> brings the TSX view and its Rust backend; the app builds with the Rust toolchain.</p>
       <div class="cta">
         <a class="btn primary" href="https://github.com/JetSquirrel/nsh-graph#readme">Read the docs</a>
         <a class="btn" href="https://github.com/JetSquirrel/nsh-graph">Star on GitHub</a>
