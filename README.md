@@ -27,9 +27,17 @@ model) and on [Neo4j NVL](https://neo4j.com/docs/nvl/current/) (data model, cont
 
 ## Install
 
+nsh-graph is an [nshm](https://nsh.dev/versions/main/docs/nshm/): one package with the TSX view and its Rust
+backend.
+
 ```sh
-pnpm add nsh-graph     # or npm / bun; NSH compiles the TSX source with your app
+nsh add nsh-graph                    # from crates.io
+nsh add github:JetSquirrel/nsh-graph # or from GitHub
 ```
+
+This adds it to `"dependencies"` in the app's nsh.json and pins it in `nsh.lock`. Import the view from `"nsh-graph"`
+and, optionally, the Rust backend from `"nsh-graph/native"` (see [Rust backend](#rust-backend)). The package
+includes Rust, so the app builds with the Rust toolchain (and the `wasm32-unknown-unknown` target for the web).
 
 Requires NSH 0.6 or later. 0.6 added `onKeyDown`, `onPinch` and `captureKeys`, which the view uses.
 
@@ -183,8 +191,8 @@ settle slowly and frames drop while they do. For those, use the Rust backend bel
 
 ### Rust backend
 
-`native/` is an optional Rust crate, `nsh-graph/native`, after gpui-graph's Rust layout and batched painting.
-It moves the two hot paths out of QuickJS:
+The package's Rust module, `nsh-graph/native` (source in `native/`), follows gpui-graph's Rust layout and
+batched painting. It moves the two hot paths out of QuickJS:
 
 - **`ForceLayout`**: the force simulation, the same forces step for step (the layouts match), at the
   configured Barnes–Hut accuracy at every size.
@@ -192,11 +200,7 @@ It moves the two hot paths out of QuickJS:
   draws with a handful of `Path2D` calls instead of several calls per edge and node. Arrows, captions,
   rings and hulls are unchanged.
 
-To use it, list the crate in the app's nsh.json and register it once at startup:
-
-```json
-{ "rust": ["../nsh-graph/native"] }
-```
+It is opt-in: register it once at startup.
 
 ```ts
 import * as native from "nsh-graph/native";
@@ -204,12 +208,14 @@ import { setNativeBackend, type NativeBackend } from "nsh-graph";
 setNativeBackend(native as unknown as NativeBackend);
 ```
 
-Views mounted after that use it; without it nothing changes. NSH builds app crates unoptimized in
-`nsh run` and `nsh test`, about ten times slower, so also add the crate to the app's `.cargo/config.toml`
-(this repository's covers `perf/` and `example/`):
+Views mounted after that use it. Without it, the TypeScript layout runs.
+
+NSH builds nshms from crates.io and Git optimized. A local checkout added with `nsh add --path` builds with the
+app's dev profile, about ten times slower. If you use one, add this to the app's `.cargo/config.toml`
+(this repository's covers `perf/`):
 
 ```toml
-[profile.dev.package.nsh-graph-native]
+[profile.dev.package.nsh-graph]
 opt-level = 3
 ```
 

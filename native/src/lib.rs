@@ -1,6 +1,6 @@
-//! nsh-graph's native part (`nsh-graph/native`): the force layout in Rust.
+//! nsh-graph's native part (`nsh-graph/native`): the force layout and painting in Rust.
 //!
-//! An app that lists this crate in its nsh.json `"rust"` imports it and hands it to nsh-graph once:
+//! An app that adds the nsh-graph nshm (`nsh add nsh-graph`) imports it and hands it to nsh-graph once:
 //!
 //! ```ts
 //! import * as native from "nsh-graph/native";

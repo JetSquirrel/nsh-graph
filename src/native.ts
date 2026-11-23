@@ -1,6 +1,6 @@
 /**
- * The optional Rust backend (`native/`, imported as `nsh-graph/native`). An app that lists the crate in its
- * nsh.json `"rust"` registers it once; from then on new `ForceSimulation`s tick in Rust:
+ * The optional Rust backend (`native/`, imported as `nsh-graph/native`). An app that adds the nsh-graph nshm
+ * registers it once; from then on new `ForceSimulation`s tick in Rust:
  *
  * ```ts
  * import * as native from "nsh-graph/native";
