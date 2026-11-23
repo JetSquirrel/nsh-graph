@@ -176,10 +176,13 @@ NSH runs TSX on QuickJS on every platform except the web. QuickJS is an interpre
 far more there than in a browser. The view is built around that limit:
 
 - The Barnes–Hut tree and the collision grid live in reusable typed arrays, so a tick allocates nothing.
+  The tree walk follows precomputed links instead of a stack, and the hot loops keep their locals in `var`s,
+  which QuickJS reads without the checks it makes on `let` and `const`.
 - Barnes–Hut accuracy coarsens past 300 nodes.
 - Nodes are drawn one path per color. Arrows, separator rings and captions are dropped when they would be
   too small to see, and at most 300 captions are placed per frame.
-- Edge shapes are computed lazily, and only for edges on screen.
+- Straight edges are traced without building shape objects; curved ones and loops are computed lazily, and
+  only for edges on screen.
 - While a tick is expensive, panning and zooming pause the layout, so the view keeps up with the fingers.
 - With Reduce Motion on, the layout settles in 10 ms slices and appears once it is done.
 
@@ -187,11 +190,11 @@ Measured on QuickJS (`nsh test example`, `datasets.test.ts`), JS time per frame:
 
 | Graph | Tick | Draw | Settles in |
 |---|---|---|---|
-| Karate club, 34 nodes / 78 edges | 1.2 ms | 1.6 ms | 0.4 s |
-| Les Misérables, 77 / 254 | 3.6 ms | 5 ms | 1.1 s |
-| Flare imports, 220 / 764 | 14 ms | 16 ms | 3.9 s |
-| Star, 301 / 300 | 18 ms | 13 ms | 5.8 s |
-| Scale-free, 1500 / 2997 | 80 ms | 30 ms | 22 s |
+| Karate club, 34 nodes / 78 edges | 0.7 ms | 1 ms | 0.2 s |
+| Les Misérables, 77 / 254 | 2.1 ms | 2.6 ms | 0.5 s |
+| Flare imports, 220 / 764 | 7 ms | 4 ms | 1.9 s |
+| Star, 301 / 300 | 10 ms | 5 ms | 2.8 s |
+| Scale-free, 1500 / 2997 | 42 ms | 8 ms | 12 s |
 
 In TypeScript, a live force layout stays smooth up to a few hundred nodes. Larger graphs work, but they
 settle slowly and frames drop while they do. For those, use the Rust backend below, or `hierarchical`,
@@ -245,9 +248,10 @@ positions between JS objects and Rust, and most of the rest is the many-body for
 [docs/comparison.md](docs/comparison.md) compares nsh-graph with gpui-graph, Neo4j NVL, Cytoscape.js, sigma.js,
 AntV G6, vis-network, ECharts and d3-force, feature by feature. It also has layout benchmarks run inside NSH's
 runtime (`nsh test bench`), against d3-force, ForceAtlas2, AntV G6's force and Fruchterman layouts
-(@antv/layout) and WebCola. With the same forces, nsh-graph matches d3-force's layout quality at 2.3–4.7× the
-speed, and it lays out 2–6× faster than AntV's layouts with fewer edge crossings (AntV force has 2–2.3× as
-many). ForceAtlas2 crosses fewer edges, and WebCola piles up fewer nodes but is far slower.
+(@antv/layout) and WebCola. nsh-graph is the fastest on every dataset. With the same forces, it matches
+d3-force's layout quality at 3.8–8.3× the speed, and it lays out 3–12× faster than AntV's layouts with fewer
+edge crossings (AntV force has 2.3–2.5× as many). ForceAtlas2 crosses fewer edges, and WebCola piles up fewer
+nodes but is far slower.
 
 ## Datasets and gallery
 
