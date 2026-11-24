@@ -16,7 +16,8 @@ model) and on [Neo4j NVL](https://neo4j.com/docs/nvl/current/) (data model, cont
   Tap to select; Shift-, Ctrl- or ⌘-click adds or removes a node, Shift-drag on the background draws a selection
   box, and dragging one of several selected nodes moves them all. Double-tap or Enter activates; right-click opens a
   context menu.
-  Hovering highlights neighbors. Arrow keys walk the graph; `+`/`-`/`0` zoom and fit; `p` pins; Esc clears.
+  Hovering highlights neighbors and shows a tooltip. Arrow keys walk the graph; `+`/`-`/`0` zoom and fit; `p` pins;
+  Esc clears.
 - **Drawing**: edges batched by state, with arrows; curved parallel edges and self loops; edge captions; community
   hulls; degree-based node sizing; captions inside or under nodes, with collision culling in `auto` mode.
 - **Communities**: [collapse a group](#communities) into one super node with its member count; edges to it are
@@ -122,6 +123,8 @@ interface GraphEdge<T> { id?: string; from: string; to: string; caption?: string
 | `onNodeActivate(node)` | | Double-tap, double-click or Enter. |
 | `onGroupToggle(group, collapsed)` | | A group was collapsed or expanded. |
 | `onHover(target)` | | Desktops and the web. |
+| `tooltips` | `true` | A card beside the pointer over a node, edge, group or bundle: its category and group (or what it is), caption, and relationship or member count. Desktops and the web. |
+| `tooltip(target)` | | Content in place of the built-in card; return `null` for none, or a `<GraphTooltip kicker title detail swatch>` for the same look with your own lines. |
 | `onContextMenu(target, { position, pagePosition })` | | Open a menu with `Menu.popup(items, e.pagePosition)` from `nsh/desktop`. |
 | `style`, `class`, `testID`, `accessibilityLabel` | | |
 
@@ -186,6 +189,8 @@ src/
   controller.ts   imperative handle
   GraphView.tsx   the NSH component: canvas, frame loop, touch / mouse / wheel / pinch / keyboard
   GraphLegend.tsx legend component
+  GraphTooltip.tsx the tooltip card
+  tooltip.ts      what the built-in tooltip says (plain TypeScript)
   native.ts       the optional Rust backend's interface and setNativeBackend
 native/src/
   lib.rs          the native module: ForceLayout and GraphPainter, data in little-endian buffers
