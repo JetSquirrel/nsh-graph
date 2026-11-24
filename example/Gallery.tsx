@@ -58,17 +58,23 @@ function Gallery() {
         </View>
         <GraphLegend controller={graph} />
       </View>
-      <GraphView
-        testID="graph"
-        data={data()}
-        controller={graph}
-        layout={layout()}
-        colorBy={colorBy()}
-        groupHulls={hulls()}
-        edgeLabels={edgeLabels()}
-        arrows={arrows()}
-        style={{ flex: 1 }}
-      />
+      <View style={{ flex: 1 }}>
+        <GraphView
+          testID="graph"
+          data={data()}
+          controller={graph}
+          layout={layout()}
+          colorBy={colorBy()}
+          groupHulls={hulls()}
+          edgeLabels={edgeLabels()}
+          arrows={arrows()}
+          style={{ flex: 1 }}
+        />
+        {/* Always in reach on the canvas, as in the demo: one wheel turn or drag can leave the graph off screen. */}
+        <View style={{ position: "absolute", top: 12, right: 12 }}>
+          <Chip label="Reset view" active={false} onPress={() => graph.fit()} testID="reset-view" />
+        </View>
+      </View>
     </View>
   );
 }

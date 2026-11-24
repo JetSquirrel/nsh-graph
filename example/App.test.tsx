@@ -47,3 +47,18 @@ test("the Reset view button over the graph brings a zoomed-in view back", async 
   await app.wait(600);
   expect(zoom()).toBe(fitted);
 });
+
+test("the gallery has a Reset view button over the graph that fits it, as the toolbar's fit does", async () => {
+  // Headless, a pan does not show in any text, so this checks the button is there and fits; the view
+  // coming back after a pan is checked by eye on a real host.
+  const app = await open("./Gallery.tsx", { width: 1100, height: 760 });
+  await app.press("id:layout-grid");
+  await app.wait(800);
+  const zoom = () => (app.texts().find((t) => t.includes(" nodes · ")) ?? "").replace(/ · settling$/, "");
+  const fitted = zoom();
+  await app.drag("id:graph", { x: 300, y: 200 });
+  await app.press("id:reset-view");
+  await app.wait(600);
+  expect(zoom()).toBe(fitted);
+  expect(app.shows("id:reset-view")).toBe(true);
+});

@@ -174,14 +174,15 @@
   .bar-row { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: center; font-size: 14px; }
   .bar-row .lbl { color: var(--muted); white-space: nowrap; }
   .bar-row .lbl.me { color: var(--text); font-weight: 600; }
-  .track { position: relative; height: 26px; }
-  .fill {
-    height: 100%; border-radius: 0 5px 5px 0; background: var(--edge);
-    display: flex; align-items: center; justify-content: flex-end; min-width: 44px;
-  }
+  /* Bars are drawn to scale; each value sits just past its bar's end, in the padding kept for it. */
+  .track { position: relative; height: 26px; padding-right: 64px; }
+  .fill { position: relative; height: 100%; border-radius: 0 4px 4px 0; background: var(--edge); }
   .fill.me { background: var(--c1); }
-  .fill span { font: 12px var(--mono); color: #fff; padding-right: 8px; }
-  .fill:not(.me) span { color: var(--text); }
+  .fill span {
+    position: absolute; left: 100%; top: 50%; transform: translateY(-50%);
+    padding-left: 8px; white-space: nowrap; font: 12px var(--mono); color: var(--muted);
+  }
+  .fill.me span { color: var(--text); font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 10px; }
   th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border); }
   th { font-weight: 550; color: var(--muted); font-size: 13px; }
@@ -221,6 +222,7 @@
     .hero { padding-top: 48px; }
     .install { width: 100%; justify-content: space-between; overflow: hidden; }
     .bar-row { grid-template-columns: 112px 1fr; font-size: 13px; }
+    .bar-row .lbl { white-space: normal; line-height: 1.25; }
     section { padding-top: 64px; }
     .frame { min-height: 520px; height: 75vh; }
   }
