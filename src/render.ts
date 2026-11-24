@@ -57,6 +57,13 @@ const DIM = 0.18;
 /** A super node's inner ring: how far inside its edge, and how wide, in graph units (it zooms with the node). */
 const SUPER_RING_INSET = 5;
 const SUPER_RING_WIDTH = 2;
+/** A batch of nodes gets its separating ring when one is at least this big on screen (radius, in points). */
+const RING_PX = 5;
+/**
+ * Level of detail with the Rust painter: nodes smaller than this on screen (radius, in points) are traced
+ * as squares, once per screen pixel and color, where a circle and a square look the same.
+ */
+const LOD_PX = 1.5;
 const widthCache = new Map<string, number>();
 /** Scratch space for `renderGraph`: the straight edges' arrow tips (x, y and angle per edge). */
 let tipBuffer = new Float64Array(0);
@@ -141,20 +148,43 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   const selEdge = selectedId?.kind === "edge" ? edges.findIndex((e) => e.id === selectedId.id) : -1;
 
   // The part of the graph on screen, with room for the biggest node and loops.
-  let maxR = 0;
-  for (const n of nodes) if (n.r > maxR) maxR = n.r;
+  const maxR = engine.maxRadius();
   const margin = maxR * 4 + 40;
   const vx0 = -tx / k - margin;
   const vy0 = -ty / k - margin;
   const vx1 = (width - tx) / k + margin;
   const vy1 = (height - ty) / k + margin;
-  // Which nodes are in view. An edge with an end in view is too (`edgeMayTouch` says so for it), so only
-  // edges with both ends out need the closer test.
-  const inView = new Uint8Array(nodes.length);
-  for (let i = 0; i < nodes.length; i++) {
-    const x = nodes[i].x;
-    const y = nodes[i].y;
-    if (x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1) inView[i] = 1;
+  // The decimals the Rust painter writes coordinates with: fewer when zoomed out, where they cannot be
+  // seen (rounding moves a point 0.05 screen points at most, up to 10× zoom), for shorter paths to parse.
+  const decimals = k <= 0.1 ? 0 : k <= 1 ? 1 : 2;
+  const nc = distinct.length;
+  const nb = nc * 2;
+
+  // With the Rust painter, the node pass (what is in view, each node's batch, which batches get a ring, and
+  // the paths, with level of detail) runs there: on QuickJS those per-node loops were most of a frame.
+  let frame: { circles: string[]; ringed: Uint8Array } | null = null;
+  let inView: Uint8Array;
+  const p = native?.painter;
+  if (p && p.frameNodes && p.frameInfo && p.setRanks) {
+    engine.paintPositions(p);
+    if (engine.paintedRanks !== rank) {
+      p.setRanks(new Uint8Array(rank.buffer, rank.byteOffset, rank.byteLength));
+      engine.paintedRanks = rank;
+    }
+    const focused = focus ? Uint32Array.from(focus.nodes) : new Uint32Array(0);
+    const circles = p.frameNodes(new Uint8Array(focused.buffer), nc, [vx0, vy0, vx1, vy1, decimals, k, RING_PX, LOD_PX]);
+    const info = p.frameInfo();
+    inView = info.subarray(0, nodes.length);
+    frame = { circles, ringed: info.subarray(nodes.length, nodes.length + nb) };
+  } else {
+    // Which nodes are in view. An edge with an end in view is too (`edgeMayTouch` says so for it), so only
+    // edges with both ends out need the closer test.
+    inView = new Uint8Array(nodes.length);
+    for (let i = 0; i < nodes.length; i++) {
+      const x = nodes[i].x;
+      const y = nodes[i].y;
+      if (x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1) inView[i] = 1;
+    }
   }
   const edgeVisible = (i: number) =>
     inView[edges[i].source] === 1 || inView[edges[i].target] === 1 || engine.edgeMayTouch(i, vx0, vy0, vx1, vy1);
@@ -166,9 +196,6 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   cx.lineCap = "round";
   cx.lineJoin = "round";
   const px = 1 / k; // one screen point, in graph units
-  // The decimals the Rust painter writes coordinates with: fewer when zoomed out, where they cannot be
-  // seen (rounding moves a point 0.05 screen points at most, up to 10× zoom), for shorter paths to parse.
-  const decimals = k <= 0.1 ? 0 : k <= 1 ? 1 : 2;
 
   // ---- Community hulls
   if (options.groupHulls) {
@@ -283,7 +310,9 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
       sent = states.slice();
       for (const i of customs) sent[i] = 255;
     }
-    traced = native.painter.traceEdges(sent, [vx0, vy0, vx1, vy1, arrows ? 1 : 0, arrowLen(Math.max(1.5, 0.75 * px)), decimals]);
+    // The zoom turns on level of detail: edges hidden under their nodes, too short to see, or (zoomed out) on
+    // the same pixels as another are left out.
+    traced = native.painter.traceEdges(sent, [vx0, vy0, vx1, vy1, arrows ? 1 : 0, arrowLen(Math.max(1.5, 0.75 * px)), decimals, frame ? k : 0]);
   } else {
     const isCustom = new Uint8Array(edges.length);
     for (const i of customs) isCustom[i] = 1;
@@ -342,27 +371,34 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
 
   // ---- Nodes: one path per color (dimmed ones first, beneath), not a fill and a stroke per node. Batch b
   // holds the dimmed nodes of color `distinct[b]` for b < nc, the others of `distinct[b - nc]` after them.
-  const nc = distinct.length;
-  const nb = nc * 2;
+  // With the Rust painter's node pass, `frame` has the batches' paths already.
   const counts = new Uint32Array(nb);
   // Whether a batch has a node big enough on screen for a ring.
-  const ringed = new Uint8Array(nb);
-  const keys = native ? new Uint32Array(nodes.length) : null;
-  const members: number[][] | null = native ? null : Array.from({ length: nb }, () => []);
-  for (let i = 0; i < nodes.length; i++) {
-    if (inView[i] === 0) {
-      if (keys) keys[i] = 0xffffffff;
-      continue;
+  let ringed: Uint8Array = new Uint8Array(nb);
+  let circles: string[] | null = null;
+  let members: number[][] | null = null;
+  if (frame) {
+    circles = frame.circles;
+    ringed = frame.ringed;
+    for (let b = 0; b < nb; b++) if (circles[b]) counts[b] = 1;
+  } else {
+    const keys = native ? new Uint32Array(nodes.length) : null;
+    members = native ? null : Array.from({ length: nb }, () => []);
+    for (let i = 0; i < nodes.length; i++) {
+      if (inView[i] === 0) {
+        if (keys) keys[i] = 0xffffffff;
+        continue;
+      }
+      const n = nodes[i];
+      const b = (focus !== null && !focus.nodes.has(i) ? 0 : nc) + rank[i];
+      if (keys) keys[i] = b;
+      else members![b].push(i);
+      counts[b]++;
+      if (n.r * k >= RING_PX) ringed[b] = 1;
     }
-    const n = nodes[i];
-    const b = (focus !== null && !focus.nodes.has(i) ? 0 : nc) + rank[i];
-    if (keys) keys[i] = b;
-    else members![b].push(i);
-    counts[b]++;
-    if (n.r * k >= 5) ringed[b] = 1;
+    // The Rust painter traces each batch's circles into one path.
+    if (native && keys) circles = native.painter.traceNodes(new Uint8Array(keys.buffer), nb, [vx0, vy0, vx1, vy1, decimals]);
   }
-  // The Rust painter traces each batch's circles into one path.
-  const circles = native && keys ? native.painter.traceNodes(new Uint8Array(keys.buffer), nb, [vx0, vy0, vx1, vy1, decimals]) : null;
   for (let b = 0; b < nb; b++) {
     if (counts[b] === 0) continue;
     cx.globalAlpha = b < nc ? DIM + 0.1 : 1;
@@ -404,10 +440,13 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
     cx.stroke();
   }
   cx.globalAlpha = 1;
-  for (let i = 0; i < nodes.length; i++) {
+  // Rings and badges: only the selected, hovered and pinned nodes, not a look at every node.
+  const marked = new Set<number>(selNodes);
+  if (hoverNode >= 0) marked.add(hoverNode);
+  for (const i of engine.pinnedIndices()) marked.add(i);
+  for (const i of [...marked].sort((a, b) => a - b)) {
     const n = nodes[i];
-    if (!selNodes.has(i) && i !== hoverNode && n.fx === null) continue;
-    if (inView[i] === 0) continue;
+    if (!n || inView[i] === 0) continue;
     if (selNodes.has(i)) {
       cx.beginPath();
       cx.arc(n.x, n.y, n.r + 3.5 * px, 0, Math.PI * 2);

@@ -54,13 +54,16 @@ pub struct GraphPainter {
     x: Vec<f64>,
     y: Vec<f64>,
     r: Vec<f64>,
+    /// Each node's color rank (`setRanks`), and what the last `frameNodes` worked out (`frameInfo`).
+    ranks: Vec<u32>,
+    frame: Vec<u8>,
 }
 
 #[class]
 impl GraphPainter {
     /// A painter with no edges or nodes yet.
     pub fn new() -> Self {
-        GraphPainter { edges: Vec::new(), x: Vec::new(), y: Vec::new(), r: Vec::new() }
+        GraphPainter { edges: Vec::new(), x: Vec::new(), y: Vec::new(), r: Vec::new(), ranks: Vec::new(), frame: Vec::new() }
     }
 
     /// The edges, 5 f64 each: source, target, bend, self (1 or 0), loop index.
@@ -113,7 +116,8 @@ impl GraphPainter {
 
     /// The edges' paths, one u8 state per edge (0 dimmed, 1 normal, 2 highlighted, else left out), with
     /// `style` = x0, y0, x1, y1 (the graph-space view), arrows (1 or 0), arrow length, and optionally the
-    /// most decimals a coordinate gets (0 to 2, default 2). Returns six strings: the lines and arrow heads
+    /// most decimals a coordinate gets (0 to 2, default 2) and the zoom (screen points per graph unit) for level of detail
+    /// (absent or 0: off). Returns six strings: the lines and arrow heads
     /// of states 0, 1 and 2.
     pub fn trace_edges(&self, states: Vec<u8>, style: Vec<f64>) -> Result<Vec<String>, String> {
         let view = rect(&style)?;
@@ -122,6 +126,7 @@ impl GraphPainter {
             arrows: style.get(4).is_some_and(|&a| a != 0.),
             arrow_len: style.get(5).copied().unwrap_or(0.),
             decimals: decimals(style.get(6)),
+            scale: style.get(7).copied().filter(|k| k.is_finite() && *k > 0.).unwrap_or(0.),
         };
         let batches = paint::trace_edges(&self.edges, &states, &self.x, &self.y, &self.r, &style);
         Ok(batches.into_iter().flat_map(|b| [b.lines, b.arrows]).collect())
@@ -134,6 +139,51 @@ impl GraphPainter {
         let keys: Vec<u32> = keys.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
         let decimals = decimals(view.get(4));
         Ok(paint::trace_nodes(&keys, batches.clamp(0., 1e6) as usize, &self.x, &self.y, &self.r, &rect(&view)?, decimals))
+    }
+
+    /// Each node's color: its rank among the distinct fills, one u32 per node. Given when the colors
+    /// change, for `frameNodes`.
+    pub fn set_ranks(&mut self, ranks: Vec<u8>) -> Result<(), String> {
+        if ranks.len() % 4 != 0 {
+            return Err("ranks must hold u32".into());
+        }
+        self.ranks = ranks.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        Ok(())
+    }
+
+    /// The renderer's node pass: which nodes are in view, their batches (by color, dimmed unless in
+    /// `focus`, a list of u32 node indices; empty for no focus), which batches get a ring, and one path per
+    /// batch, with level of detail. `colors` is how many distinct fills there are; `style` = x0, y0, x1, y1
+    /// (the graph-space view), decimals, zoom, the ring's least radius on screen and the level-of-detail
+    /// radius (both in points). Returns `2 × colors` paths (dimmed batches first); `frameInfo` then says
+    /// which nodes were in view and which batches get a ring.
+    pub fn frame_nodes(&mut self, focus: Vec<u8>, colors: f64, style: Vec<f64>) -> Result<Vec<String>, String> {
+        let view = rect(&style)?;
+        let at = |i: usize, default: f64| style.get(i).copied().filter(|v| v.is_finite()).unwrap_or(default);
+        let style = paint::FrameStyle { view, decimals: decimals(style.get(4)), scale: at(5, 0.).max(0.), ring_px: at(6, 5.), lod_px: at(7, 0.) };
+        let n = self.x.len();
+        let mask: Option<Vec<bool>> = if focus.len() >= 4 {
+            let mut m = vec![false; n];
+            for c in focus.chunks_exact(4) {
+                let i = u32::from_le_bytes(c.try_into().unwrap()) as usize;
+                if i < n {
+                    m[i] = true;
+                }
+            }
+            Some(m)
+        } else {
+            None
+        };
+        let frame = paint::frame_nodes(&self.ranks, mask.as_deref(), colors.clamp(0., 1e6) as usize, &self.x, &self.y, &self.r, &style);
+        self.frame.clear();
+        self.frame.extend_from_slice(&frame.in_view);
+        self.frame.extend_from_slice(&frame.ringed);
+        Ok(frame.paths)
+    }
+
+    /// What the last `frameNodes` worked out: one u8 per node (1: in view), then one per batch (1: ringed).
+    pub fn frame_info(&self) -> Vec<u8> {
+        self.frame.clone()
     }
 }
 
