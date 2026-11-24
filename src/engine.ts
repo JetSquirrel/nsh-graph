@@ -110,9 +110,15 @@ export type EngineEvent =
   | { type: "hover"; target: HitTarget | null }
   | { type: "group"; group: GraphGroup; collapsed: boolean };
 
-/** The ids of super nodes and edge bundles start with these, so they never meet the data's own ids. */
-const SUPER_PREFIX = "\u0000group:";
-const BUNDLE_PREFIX = "\u0000bundle:";
+/**
+ * Joins ids into keys (node pairs, bundles) and starts the ids of super nodes and edge bundles, so they never
+ * meet the data's own: a private-use character, which no real id has. Not NUL: the release build's minifier
+ * writes a NUL in a string (escaped or built with `String.fromCharCode(0)`) as a raw NUL byte, and the web
+ * packager refuses a bundle with one.
+ */
+const SEP = String.fromCharCode(0xe000);
+const SUPER_PREFIX = SEP + "group:";
+const BUNDLE_PREFIX = SEP + "bundle:";
 
 interface Viewport {
   k: number;
@@ -251,7 +257,7 @@ export class GraphEngine {
     const degree = new Map<string, number>();
     for (const edge of data.edges) {
       if (!model.has(edge.from) || !model.has(edge.to)) continue;
-      const pair = edge.from < edge.to ? `${edge.from}\u0000${edge.to}` : `${edge.to}\u0000${edge.from}`;
+      const pair = edge.from < edge.to ? `${edge.from}${SEP}${edge.to}` : `${edge.to}${SEP}${edge.from}`;
       const nth = pairCount.get(pair) ?? 0;
       pairCount.set(pair, nth + 1);
       let id = edge.id ?? `${edge.from}->${edge.to}#${nth}`;
@@ -362,7 +368,7 @@ export class GraphEngine {
       if (count < 2) continue; // one edge: drawn as it is, only its end moved
       const from = nodes[e.source].id;
       const to = nodes[e.target].id;
-      e.id = `${BUNDLE_PREFIX}${from}\u0000${to}`;
+      e.id = `${BUNDLE_PREFIX}${from}${SEP}${to}`;
       e.edge = { id: e.id, from, to, caption: `×${count}`, width: Math.min(6, 1.5 + Math.sqrt(count - 1)) };
       this.bundleCount++;
     }
@@ -374,7 +380,7 @@ export class GraphEngine {
     for (const e of edges) {
       const s = nodes[e.source];
       const t = nodes[e.target];
-      const pair = s.id < t.id ? `${s.id}\u0000${t.id}` : `${t.id}\u0000${s.id}`;
+      const pair = s.id < t.id ? `${s.id}${SEP}${t.id}` : `${t.id}${SEP}${s.id}`;
       const nth = pairCount.get(pair) ?? 0;
       pairCount.set(pair, nth + 1);
       e.loopIndex = nth;
