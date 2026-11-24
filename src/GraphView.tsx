@@ -34,6 +34,7 @@ import type {
   ForceConfig,
   GraphColors,
   GraphData,
+  GraphGroup,
   GraphNode,
   HierarchicalConfig,
   HitTarget,
@@ -90,6 +91,11 @@ export interface GraphViewProps<N = unknown, E = unknown> {
   onSelectionChange?: (selection: Selection<N, E>) => void;
   /** A node was double-tapped, double-clicked, or Enter was pressed on it: expand it, open it. */
   onNodeActivate?: (node: GraphNode<N>) => void;
+  /**
+   * A group was collapsed into a super node or expanded: by the controller, or by double-tapping (or
+   * pressing Enter on) a super node, which expands it.
+   */
+  onGroupToggle?: (group: GraphGroup<N>, collapsed: boolean) => void;
   /** The pointer moved onto a node or edge, or off it (null). Desktops and the web. */
   onHover?: (target: HitTarget<N, E> | null) => void;
   /** A context menu was asked for over a node, an edge or the background. Open one with `Menu.popup(items, e.pagePosition)`. */
@@ -194,6 +200,9 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
       selection.set(e.selection);
       props.controller?._report({ selection: e.selection });
       props.onSelectionChange?.(e.selection as Selection<N, E>);
+    } else if (e.type === "group") {
+      untracked(() => dataVersion.update((n) => n + 1));
+      props.onGroupToggle?.(e.group as GraphGroup<N>, e.collapsed);
     } else {
       props.onHover?.(e.target as HitTarget<N, E> | null);
     }
@@ -241,13 +250,13 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
     cleanup(() => c._detach(engine));
   });
 
-  // The legend follows the data, the palette and colorBy.
+  // The legend and the groups follow the data, the palette, colorBy and collapsing.
   effect(() => {
     const t = theme();
     dataVersion();
     const c = props.controller;
     if (!c) return;
-    c._report({ legend: engine.legend(t.palette, t.other) });
+    c._report({ legend: engine.legend(t.palette, t.other), groups: engine.groups() });
   });
 
   cleanup(() => {
@@ -376,15 +385,16 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
   /** A tap with Shift, Ctrl or ⌘ held: a node joins the selection or leaves it; the background keeps it. */
   const extendTap = (p: Point) => {
     lastTap = null;
-    const target = engine.hitTest(p.x, p.y, hitSlop);
-    if (target.kind === "node") engine.selectNodes([target.node.id], "toggle");
-    else if (target.kind === "edge") engine.setSelected({ kind: "edge", id: target.edge.id });
+    const hit = engine.hitIndex(p.x, p.y, hitSlop);
+    if (hit?.kind === "node" && engine.nodes[hit.index].superOf === null) engine.selectNodes([engine.nodes[hit.index].id], "toggle");
+    else if (hit?.kind === "node") engine.selectDrawn(hit.index);
+    else if (hit) engine.setSelected({ kind: "edge", id: engine.edges[hit.index].id });
     invalidate();
   };
 
   const tap = (p: Point) => {
     const target = engine.selectAt(p.x, p.y, hitSlop);
-    const id = target.kind === "node" ? target.node.id : null;
+    const id = target.kind === "node" ? target.node.id : target.kind === "group" ? engine.superId(target.group.id) : null;
     const time = Date.now();
     const double =
       lastTap !== null &&
@@ -393,6 +403,7 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
       lastTap.node === id;
     lastTap = double ? null : { time, x: p.x, y: p.y, node: id };
     if (double && target.kind === "node") props.onNodeActivate?.(target.node as GraphNode<N>);
+    else if (double && target.kind === "group") engine.setGroupsCollapsed([target.group.id], false);
     invalidate();
   };
 
@@ -432,7 +443,12 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
     if (target.kind === "node" && engine.isSelected(target.node.id)) {
       if (engine.selected?.id !== target.node.id) engine.selectNodes([target.node.id], "add");
     } else if (target.kind === "node") engine.setSelected({ kind: "node", id: target.node.id });
+    else if (target.kind === "group") engine.setSelected({ kind: "group", id: target.group.id });
     else if (target.kind === "edge") engine.setSelected({ kind: "edge", id: target.edge.id });
+    else if (target.kind === "bundle") {
+      const hit = engine.hitIndex(e.position.x, e.position.y, 2);
+      if (hit?.kind === "edge") engine.setSelected({ kind: "edge", id: engine.edges[hit.index].id });
+    }
     invalidate();
     props.onContextMenu?.(target as HitTarget<N, E>, { position: e.position, pagePosition: e.pagePosition });
   };
@@ -442,7 +458,9 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
   /** Selects a node from the keyboard; with `extend` (Shift) it joins the selection. */
   const selectNode = (node: GraphNode | null, extend = false) => {
     if (!node) return;
-    if (extend && multi()) engine.selectNodes([node.id], "add");
+    const group = engine.groupOfSuper(node.id);
+    if (group !== null) engine.setSelected({ kind: "group", id: group });
+    else if (extend && multi()) engine.selectNodes([node.id], "add");
     else engine.setSelected({ kind: "node", id: node.id });
     const p = engine.position(node.id)!;
     const s = engine.graphToScreen(p.x, p.y);
@@ -457,7 +475,7 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
   const onKeyDown = (e: KeyEvent) => {
     const shift = !!e.modifiers?.shift;
     if ((e.key === "a" || e.key === "A") && (e.modifiers?.platform || e.modifiers?.control)) {
-      if (multi()) engine.selectNodes(engine.nodes.map((n) => n.id));
+      if (multi()) engine.selectNodes(engine.nodeIds());
       return invalidate();
     }
     switch (e.key) {
@@ -468,6 +486,10 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
       case "Enter": {
         const sel = engine.selection();
         if (sel?.kind === "node") props.onNodeActivate?.(sel.node as GraphNode<N>);
+        else if (sel?.kind === "group") {
+          engine.setGroupsCollapsed([sel.group.id], false);
+          invalidate();
+        }
         return;
       }
       case "Escape":
@@ -490,6 +512,9 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
         if (sel?.kind === "node") {
           const pin = !engine.isPinned(sel.node.id);
           for (const n of sel.nodes) engine.setPinned(n.id, pin);
+        } else if (sel?.kind === "group") {
+          const id = engine.superId(sel.group.id);
+          engine.setPinned(id, !engine.isPinned(id));
         }
         return invalidate();
       }
@@ -509,8 +534,14 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
         ? `, selected ${sel.node.caption ?? sel.node.id}`
         : sel?.kind === "edge"
           ? `, selected ${sel.edge.caption ?? "edge"}`
+        : sel?.kind === "group"
+          ? `, selected group ${sel.group.label} of ${sel.group.nodes.length} nodes, collapsed`
+        : sel?.kind === "bundle"
+          ? `, selected ${sel.edges.length} edges`
           : "";
-    return `${base}: ${engine.nodes.length} nodes, ${engine.edges.length} edges${what}`;
+    const collapsed = engine.supersShown;
+    const groups = collapsed > 0 ? `, ${collapsed} ${collapsed === 1 ? "group" : "groups"} collapsed` : "";
+    return `${base}: ${engine.nodeCount} nodes, ${engine.edgeCount} edges${groups}${what}`;
   };
 
   return (

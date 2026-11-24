@@ -13,6 +13,7 @@ import type {
   ColorBy,
   ForceConfig,
   GraphData,
+  GraphGroup,
   GraphEdge,
   GraphNode,
   HierarchicalConfig,
@@ -34,6 +35,10 @@ export interface EngineNode extends SimNode {
   neighbors: Set<number>;
   /** Whether `pinned` came from the data (so a later `pinned: false` releases it). */
   pinnedByData: boolean;
+  /** For a collapsed group's super node, the group's id; null for the data's own nodes. */
+  superOf: string | null;
+  /** How many nodes a super node stands for (0 for the data's own nodes). */
+  members: number;
 }
 
 export interface EngineEdge {
@@ -45,6 +50,11 @@ export interface EngineEdge {
   bend: number;
   self: boolean;
   loopIndex: number;
+  /**
+   * For an edge to or from a collapsed group's super node, the data's edges it stands for: several are
+   * bundled into one per direction (`edge` is then made up: caption `×N`, thicker). Null for other edges.
+   */
+  bundle: ResolvedEdge[] | null;
 }
 
 /** The nodes' fills, as `GraphEngine.nodeColors` gives them. */
@@ -97,7 +107,12 @@ export const DEFAULT_OPTIONS: EngineOptions = {
 /** What the engine reports to its host. */
 export type EngineEvent =
   | { type: "selection"; selection: Selection }
-  | { type: "hover"; target: HitTarget | null };
+  | { type: "hover"; target: HitTarget | null }
+  | { type: "group"; group: GraphGroup; collapsed: boolean };
+
+/** The ids of super nodes and edge bundles start with these, so they never meet the data's own ids. */
+const SUPER_PREFIX = "\u0000group:";
+const BUNDLE_PREFIX = "\u0000bundle:";
 
 interface Viewport {
   k: number;
@@ -133,7 +148,7 @@ export class GraphEngine {
    * The primary selection, by id: the edge selected, or the node selected last. With several nodes
    * selected, `selectedNodes` holds them all.
    */
-  selected: { kind: "node" | "edge"; id: string } | null = null;
+  selected: { kind: "node" | "edge" | "group"; id: string } | null = null;
   /** The selected nodes' ids, in the order they were selected: the primary one is last. Empty for an edge. */
   selectedNodes: ReadonlySet<string> = new Set();
   /** The selection box being dragged, in screen points, or null. */
@@ -148,8 +163,23 @@ export class GraphEngine {
 
   onEvent: ((e: EngineEvent) => void) | null = null;
 
+  /** What is drawn, by id: the visible nodes of the data and the super nodes of collapsed groups. */
   private byId = new Map<string, EngineNode>();
   private edgeById = new Map<string, EngineEdge>();
+  /** Every node of the data by id, members of collapsed groups too (they keep their positions there). */
+  private model = new Map<string, EngineNode>();
+  private modelNodes: EngineNode[] = [];
+  /** Every edge of the data with both ends present, its id resolved. */
+  private modelEdges: ResolvedEdge[] = [];
+  private modelDegree = new Map<string, number>();
+  /** The collapsed groups, and their super nodes. */
+  private collapsed = new Set<string>();
+  private supers = new Map<string, EngineNode>();
+  /** Where a collapsed group's members were centered when it collapsed: expanding moves them by the super node's travel. */
+  private anchors = new Map<string, Pt>();
+  private groupLabels = new Map<string, string>();
+  /** How many edge bundles are drawn (they are captioned even without `edgeLabels`). */
+  bundleCount = 0;
   private slots = new SlotAssigner(8);
   private random = lcg(42);
   private loaded = false;
@@ -197,71 +227,156 @@ export class GraphEngine {
    * and selection; new ones start next to a neighbor that is already placed.
    */
   setData(data: GraphData) {
-    const previous = this.byId;
-    const nodes: EngineNode[] = [];
-    const byId = new Map<string, EngineNode>();
-    let added = 0;
+    const previous = this.model;
+    const model = new Map<string, EngineNode>();
+    const modelNodes: EngineNode[] = [];
     for (const node of data.nodes) {
-      if (byId.has(node.id)) continue; // first one wins
+      if (model.has(node.id)) continue; // first one wins
       let n = previous.get(node.id);
-      if (n) {
-        n.node = node;
-      } else {
-        n = {
-          id: node.id,
-          index: 0,
-          node,
-          x: NaN,
-          y: NaN,
-          vx: 0,
-          vy: 0,
-          fx: null,
-          fy: null,
-          r: 0,
-          group: null,
-          degree: 0,
-          category: "",
-          neighbors: new Set(),
-          pinnedByData: false,
-        };
-        added++;
-      }
-      n.index = nodes.length;
+      if (n) n.node = node;
+      else n = newEngineNode(node.id, node);
       n.group = node.group ?? null;
       n.category = node.category ?? "";
-      n.degree = 0;
-      n.neighbors = new Set();
-      nodes.push(n);
-      byId.set(node.id, n);
+      model.set(node.id, n);
+      modelNodes.push(n);
     }
-    const removed = previous.size - (nodes.length - added);
 
-    // Edges: drop those with a missing end; number parallel edges and loops.
-    const edges: EngineEdge[] = [];
-    const edgeById = new Map<string, EngineEdge>();
+    // Edges: drop those with a missing end, and give each an id (parallel ones are numbered).
+    const modelEdges: ResolvedEdge[] = [];
+    const ids = new Set<string>();
     const pairCount = new Map<string, number>();
-    const pairs: string[] = [];
+    const degree = new Map<string, number>();
     for (const edge of data.edges) {
-      const s = byId.get(edge.from);
-      const t = byId.get(edge.to);
-      if (!s || !t) continue;
+      if (!model.has(edge.from) || !model.has(edge.to)) continue;
       const pair = edge.from < edge.to ? `${edge.from}\u0000${edge.to}` : `${edge.to}\u0000${edge.from}`;
       const nth = pairCount.get(pair) ?? 0;
       pairCount.set(pair, nth + 1);
       let id = edge.id ?? `${edge.from}->${edge.to}#${nth}`;
-      if (edgeById.has(id)) id = `${id}~${edges.length}`;
+      if (ids.has(id)) id = `${id}~${modelEdges.length}`;
+      ids.add(id);
+      modelEdges.push(edge.id === id ? (edge as ResolvedEdge) : { ...edge, id });
+      degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1);
+      if (edge.to !== edge.from) degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1);
+    }
+
+    this.model = model;
+    this.modelNodes = modelNodes;
+    this.modelEdges = modelEdges;
+    this.modelDegree = degree;
+    // Groups that are gone are no longer collapsed.
+    const present = this.groupIds();
+    for (const g of [...this.collapsed]) {
+      if (present.has(g)) continue;
+      this.collapsed.delete(g);
+      this.supers.delete(g);
+      this.anchors.delete(g);
+    }
+    this.rebuild(null);
+  }
+
+  /**
+   * Works out what is drawn from the data and the collapsed groups: the data's nodes, less the members of
+   * collapsed groups, plus a super node for each of those; edges to and from a super node merge into one
+   * per direction, and edges inside a collapsed group are left out. `alpha`: how hard to rerun the layout
+   * when nodes came or went (null: as for a data change).
+   */
+  private rebuild(alpha: number | null) {
+    const previous = this.byId;
+    const nodes: EngineNode[] = [];
+    const byId = new Map<string, EngineNode>();
+    const show = (n: EngineNode) => {
+      n.index = nodes.length;
+      n.degree = 0;
+      n.neighbors = new Set();
+      nodes.push(n);
+      byId.set(n.id, n);
+    };
+    const hidden = new Map<string, EngineNode[]>();
+    for (const n of this.modelNodes) {
+      if (n.group !== null && this.collapsed.has(n.group)) {
+        const list = hidden.get(n.group);
+        if (list) list.push(n);
+        else hidden.set(n.group, [n]);
+      } else {
+        show(n);
+      }
+    }
+    for (const [g, members] of hidden) {
+      let s = this.supers.get(g);
+      if (!s) {
+        s = newEngineNode(SUPER_PREFIX + g, { id: SUPER_PREFIX + g });
+        const c = centroid(members);
+        s.x = c.x;
+        s.y = c.y;
+        this.supers.set(g, s);
+        this.anchors.set(g, c);
+      }
+      s.superOf = g;
+      s.members = members.length;
+      s.category = majorityCategory(members);
+      s.node = { id: s.id, caption: this.groupLabels.get(g) ?? g, category: s.category || undefined, group: g };
+      show(s);
+    }
+    let added = 0;
+    for (const n of nodes) if (!previous.has(n.id)) added++;
+    let removed = 0;
+    for (const id of previous.keys()) if (!byId.has(id)) removed++;
+
+    // The node that draws a data node: itself, or its group's super node.
+    const slot = (id: string): EngineNode => {
+      const n = this.model.get(id)!;
+      return n.group !== null && this.collapsed.has(n.group) ? this.supers.get(n.group)! : n;
+    };
+    const edges: EngineEdge[] = [];
+    const merged = new Map<string, EngineEdge>();
+    for (const edge of this.modelEdges) {
+      const s = slot(edge.from);
+      const t = slot(edge.to);
+      const touchesGroup = s.superOf !== null || t.superOf !== null;
+      if (touchesGroup && s === t) continue; // inside a collapsed group
+      const key = touchesGroup ? `${s.index},${t.index}` : "";
+      const into = touchesGroup ? merged.get(key) : undefined;
+      if (into) {
+        into.bundle!.push(edge);
+        continue;
+      }
       const e: EngineEdge = {
-        id,
-        edge: edge.id === id ? (edge as ResolvedEdge) : { ...edge, id },
+        id: edge.id,
+        edge,
         source: s.index,
         target: t.index,
         bend: 0,
         self: s === t,
-        loopIndex: nth,
+        loopIndex: 0,
+        bundle: touchesGroup ? [edge] : null,
       };
       edges.push(e);
+      if (touchesGroup) merged.set(key, e);
+    }
+    this.bundleCount = 0;
+    for (const e of merged.values()) {
+      const count = e.bundle!.length;
+      if (count < 2) continue; // one edge: drawn as it is, only its end moved
+      const from = nodes[e.source].id;
+      const to = nodes[e.target].id;
+      e.id = `${BUNDLE_PREFIX}${from}\u0000${to}`;
+      e.edge = { id: e.id, from, to, caption: `×${count}`, width: Math.min(6, 1.5 + Math.sqrt(count - 1)) };
+      this.bundleCount++;
+    }
+
+    // Number parallel edges and loops, and count degrees and neighbors, as drawn.
+    const pairCount = new Map<string, number>();
+    const pairs: string[] = [];
+    const edgeById = new Map<string, EngineEdge>();
+    for (const e of edges) {
+      const s = nodes[e.source];
+      const t = nodes[e.target];
+      const pair = s.id < t.id ? `${s.id}\u0000${t.id}` : `${t.id}\u0000${s.id}`;
+      const nth = pairCount.get(pair) ?? 0;
+      pairCount.set(pair, nth + 1);
+      e.loopIndex = nth;
       pairs.push(pair);
-      edgeById.set(id, e);
+      edgeById.set(e.id, e);
       if (s !== t) {
         s.degree++;
         t.degree++;
@@ -277,7 +392,7 @@ export class GraphEngine {
       if (m < 2) return;
       // Spread m parallel edges symmetrically; flip for edges drawn the other way round.
       const offset = (e.loopIndex - (m - 1) / 2) * PARALLEL_SPACING;
-      e.bend = e.edge.from < e.edge.to ? offset : -offset;
+      e.bend = nodes[e.source].id < nodes[e.target].id ? offset : -offset;
     });
 
     this.nodes = nodes;
@@ -303,12 +418,15 @@ export class GraphEngine {
     }
     this.sim.setGraph(nodes, edges.map((e) => ({ source: e.source, target: e.target })));
 
-    // Keep hover and selection when their target is still there.
+    // Keep hover and selection when their target is still there. Selected nodes stay selected while
+    // their group is collapsed; an edge bundled away, or a group expanded, is let go.
     this.hovered = null;
     if (this.selected?.kind === "edge") {
       if (!edgeById.has(this.selected.id)) this.setSelected(null);
+    } else if (this.selected?.kind === "group") {
+      if (!this.supers.has(this.selected.id)) this.setSelected(null);
     } else if (this.selected) {
-      const kept = [...this.selectedNodes].filter((id) => byId.has(id));
+      const kept = [...this.selectedNodes].filter((id) => this.model.has(id));
       if (kept.length !== this.selectedNodes.size) this.commitNodes(kept);
     }
     if (this.dragging >= 0) this.dragging = -1;
@@ -317,7 +435,9 @@ export class GraphEngine {
     this.prepareColors();
     const first = !this.loaded;
     this.loaded = this.loaded || nodes.length > 0;
-    if (first || added > 0 || removed > 0) this.runLayout(first ? 1 : added > 0 ? 0.6 : 0.3, first);
+    if (first || added > 0 || removed > 0) {
+      this.runLayout(first ? 1 : alpha ?? (added > 0 ? 0.6 : 0.3), first);
+    }
     this.geometryVersion++;
     this.dirty = true;
     if (this.painter) {
@@ -329,10 +449,150 @@ export class GraphEngine {
     }
   }
 
+  // -------------------------------------------------------------------------------------------
+  // Groups
+
+  /** The groups present in the data. */
+  private groupIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const n of this.modelNodes) if (n.group !== null) ids.add(n.group);
+    return ids;
+  }
+
+  /** The groups (communities) in the data, in the order they first appear. */
+  groups(): GraphGroup[] {
+    const members = new Map<string, GraphNode[]>();
+    for (const n of this.modelNodes) {
+      if (n.group === null) continue;
+      const list = members.get(n.group);
+      if (list) list.push(n.node);
+      else members.set(n.group, [n.node]);
+    }
+    return [...members].map(([id, nodes]) => this.groupInfo(id, nodes));
+  }
+
+  /** A group by id, or undefined when no node has it. */
+  group(id: string): GraphGroup | undefined {
+    const nodes: GraphNode[] = [];
+    for (const n of this.modelNodes) if (n.group === id) nodes.push(n.node);
+    return nodes.length > 0 ? this.groupInfo(id, nodes) : undefined;
+  }
+
+  private groupInfo(id: string, nodes: GraphNode[]): GraphGroup {
+    return { id, label: this.groupLabels.get(id) ?? id, collapsed: this.collapsed.has(id), nodes };
+  }
+
+  isCollapsed(id: string): boolean {
+    return this.collapsed.has(id);
+  }
+
+  /** The id of a group's super node (drawn only while the group is collapsed). */
+  superId(group: string): string {
+    return SUPER_PREFIX + group;
+  }
+
+  /** How many super nodes are drawn. */
+  get supersShown(): number {
+    return this.supers.size;
+  }
+
+  /** What a group is captioned. */
+  groupLabel(id: string): string {
+    return this.groupLabels.get(id) ?? id;
+  }
+
+  /** The group a super node stands for, by the super node's id; null for other ids. */
+  groupOfSuper(id: string): string | null {
+    return this.byId.get(id)?.superOf ?? null;
+  }
+
+  /**
+   * Collapses groups into super nodes (`collapse` true) or expands them again. `ids` null means every
+   * group. A super node starts where its members' center was; expanded, the members come back around
+   * wherever the super node went, as they were placed before. Reports a `group` event for each change.
+   */
+  setGroupsCollapsed(ids: Iterable<string> | null, collapse: boolean) {
+    const present = this.groupIds();
+    const targets = [...new Set(ids ?? present)].filter((g) => present.has(g) && this.collapsed.has(g) !== collapse);
+    if (targets.length === 0) return;
+    for (const g of targets) {
+      const members = this.modelNodes.filter((n) => n.group === g);
+      if (collapse) {
+        const c = centroid(members);
+        const s = newEngineNode(SUPER_PREFIX + g, { id: SUPER_PREFIX + g });
+        s.x = c.x;
+        s.y = c.y;
+        this.supers.set(g, s);
+        this.anchors.set(g, c);
+        this.collapsed.add(g);
+      } else {
+        const s = this.supers.get(g);
+        const a = this.anchors.get(g);
+        if (s && a && Number.isFinite(s.x - a.x) && Number.isFinite(s.y - a.y)) {
+          const dx = s.x - a.x;
+          const dy = s.y - a.y;
+          for (const n of members) {
+            n.x += dx;
+            n.y += dy;
+            n.vx = n.vy = 0;
+            if (n.fx !== null) n.fx += dx;
+            if (n.fy !== null) n.fy += dy;
+          }
+        }
+        this.supers.delete(g);
+        this.anchors.delete(g);
+        this.collapsed.delete(g);
+      }
+    }
+    this.rebuild(0.35);
+    for (const g of targets) this.onEvent?.({ type: "group", group: this.group(g)!, collapsed: collapse });
+  }
+
+  /** Collapses a group if it is expanded, expands it if collapsed. */
+  toggleGroup(id: string) {
+    this.setGroupsCollapsed([id], !this.collapsed.has(id));
+  }
+
+  /** What a group's hull and super node are captioned; null goes back to its id. */
+  setGroupLabel(id: string, label: string | null) {
+    if (label === null) this.groupLabels.delete(id);
+    else this.groupLabels.set(id, label);
+    const s = this.supers.get(id);
+    if (s) s.node = { ...s.node, caption: label ?? id };
+    this.dirty = true;
+  }
+
+  /** How many nodes and edges the data has (members of collapsed groups and bundled edges too). */
+  get nodeCount(): number {
+    return this.modelNodes.length;
+  }
+
+  get edgeCount(): number {
+    return this.modelEdges.length;
+  }
+
+  /** The ids of every node of the data. */
+  nodeIds(): string[] {
+    return this.modelNodes.map((n) => n.id);
+  }
+
+  /**
+   * The index (in `nodes`) of what draws a node of the data: the node itself, or the super node of its
+   * collapsed group. A super node's own id gives its index too. -1 for unknown ids.
+   */
+  drawnIndex(id: string): number {
+    const n = this.byId.get(id);
+    if (n) return n.index;
+    const m = this.model.get(id);
+    if (m && m.group !== null) return this.supers.get(m.group)?.index ?? -1;
+    return -1;
+  }
+
   /** Gives palette slots to the categories (or groups) shown, biggest first. */
   private prepareColors(reset = false) {
     const counts = new Map<string, number>();
-    for (const n of this.nodes) {
+    // Over the data, so a group collapsing does not shuffle colors.
+    for (const n of this.modelNodes) {
       const key = this.colorKey(n);
       if (key !== "") counts.set(key, (counts.get(key) ?? 0) + 1);
     }
@@ -344,8 +604,14 @@ export class GraphEngine {
   private updateRadii() {
     const sizing = this.options.nodeSizing;
     let maxDeg = 1;
-    for (const n of this.nodes) maxDeg = Math.max(maxDeg, n.degree);
+    for (const n of this.nodes) if (n.superOf === null) maxDeg = Math.max(maxDeg, n.degree);
+    const biggest = sizing.kind === "fixed" ? sizing.radius : sizing.max;
     for (const n of this.nodes) {
+      if (n.superOf !== null) {
+        // A super node: bigger than any node, growing slowly with its member count.
+        n.r = Math.max(1, biggest) * Math.min(2.2, 1.1 + 0.12 * Math.sqrt(n.members));
+        continue;
+      }
       const own = n.node.size;
       n.r =
         own !== undefined && Number.isFinite(own) && own > 0
@@ -640,8 +906,8 @@ export class GraphEngine {
   fitNodes(ids: Iterable<string>, animated = true) {
     const picked: EngineNode[] = [];
     for (const id of ids) {
-      const n = this.byId.get(id);
-      if (n) picked.push(n);
+      const i = this.drawnIndex(id);
+      if (i >= 0 && !picked.includes(this.nodes[i])) picked.push(this.nodes[i]);
     }
     if (picked.length === 0) return;
     this.autoFit = false;
@@ -779,10 +1045,18 @@ export class GraphEngine {
    */
   hitTest(sx: number, sy: number, slop = 2): HitTarget {
     const hit = this.hitIndex(sx, sy, slop);
-    if (!hit) return { kind: "background" };
-    return hit.kind === "node"
-      ? { kind: "node", node: this.nodes[hit.index].node }
-      : { kind: "edge", edge: this.edges[hit.index].edge };
+    return hit ? this.targetOf(hit.kind, hit.index) : { kind: "background" };
+  }
+
+  /** What node or edge i is to the host: a node, a group (a super node), an edge or a bundle of edges. */
+  private targetOf(kind: "node" | "edge", index: number): HitTarget {
+    if (kind === "node") {
+      const n = this.nodes[index];
+      const group = n.superOf !== null ? this.group(n.superOf) : undefined;
+      return group ? { kind: "group", group } : { kind: "node", node: n.node };
+    }
+    const e = this.edges[index];
+    return e.bundle && e.bundle.length > 1 ? { kind: "bundle", edges: e.bundle } : { kind: "edge", edge: e.edge };
   }
 
   hitIndex(sx: number, sy: number, slop = 2): { kind: "node" | "edge"; index: number } | null {
@@ -827,16 +1101,17 @@ export class GraphEngine {
 
   hoverTarget(): HitTarget | null {
     const h = this.hovered;
-    if (!h) return null;
-    return h.kind === "node"
-      ? { kind: "node", node: this.nodes[h.index].node }
-      : { kind: "edge", edge: this.edges[h.index].edge };
+    return h ? this.targetOf(h.kind, h.index) : null;
   }
 
-  /** Selects one node or edge by id, replacing the selection (null clears). */
-  setSelected(sel: { kind: "node" | "edge"; id: string } | null) {
-    if (sel && sel.kind === "node") return this.commitNodes(this.byId.has(sel.id) ? [sel.id] : []);
-    if (sel && !this.edgeById.has(sel.id)) sel = null;
+  /**
+   * Selects one node, edge (or bundle, by its drawn id) or collapsed group by id, replacing the selection
+   * (null clears).
+   */
+  setSelected(sel: { kind: "node" | "edge" | "group"; id: string } | null) {
+    if (sel && sel.kind === "node") return this.commitNodes(this.model.has(sel.id) ? [sel.id] : []);
+    if (sel && sel.kind === "edge" && !this.edgeById.has(sel.id)) sel = null;
+    if (sel && sel.kind === "group" && !this.supers.has(sel.id)) sel = null;
     const a = this.selected;
     const same = a === sel || (a !== null && sel !== null && a.kind === sel.kind && a.id === sel.id);
     if (same && this.selectedNodes.size === 0) return;
@@ -853,7 +1128,7 @@ export class GraphEngine {
   selectNodes(ids: Iterable<string>, mode: "replace" | "add" | "remove" | "toggle" = "replace") {
     const next = new Set(mode === "replace" ? [] : this.selectedNodes);
     for (const id of ids) {
-      if (!this.byId.has(id)) continue;
+      if (!this.model.has(id)) continue;
       const had = next.delete(id);
       if (mode === "remove" || (mode === "toggle" && had)) continue;
       next.add(id); // last: the primary one
@@ -869,7 +1144,8 @@ export class GraphEngine {
   /** Makes `ids` the selected nodes, the last one primary, and reports it when anything changed. */
   private commitNodes(ids: string[]) {
     const cur = [...this.selectedNodes];
-    const same = this.selected?.kind !== "edge" && cur.length === ids.length && cur.every((id, i) => id === ids[i]);
+    const same =
+      (this.selected === null || this.selected.kind === "node") && cur.length === ids.length && cur.every((id, i) => id === ids[i]);
     if (same) return;
     this.selectedNodes = new Set(ids);
     this.selected = ids.length > 0 ? { kind: "node", id: ids[ids.length - 1] } : null;
@@ -885,26 +1161,46 @@ export class GraphEngine {
     const s = this.selected;
     if (!s) return null;
     if (s.kind === "node") {
-      const n = this.byId.get(s.id);
+      const n = this.model.get(s.id);
       if (!n) return null;
       const nodes: GraphNode[] = [];
       for (const id of this.selectedNodes) {
-        const m = this.byId.get(id);
+        const m = this.model.get(id);
         if (m) nodes.push(m.node);
       }
       return { kind: "node", node: n.node, nodes };
     }
+    if (s.kind === "group") {
+      const group = this.group(s.id);
+      return group ? { kind: "group", group } : null;
+    }
     const e = this.edgeById.get(s.id);
-    return e ? { kind: "edge", edge: e.edge } : null;
+    if (!e) return null;
+    return e.bundle && e.bundle.length > 1 ? { kind: "bundle", edges: e.bundle } : { kind: "edge", edge: e.edge };
   }
 
   /** Selects what is under (sx, sy), or clears the selection over the background. */
   selectAt(sx: number, sy: number, slop = 2): HitTarget {
     const hit = this.hitIndex(sx, sy, slop);
     if (!hit) this.setSelected(null);
-    else if (hit.kind === "node") this.setSelected({ kind: "node", id: this.nodes[hit.index].id });
+    else if (hit.kind === "node") this.selectDrawn(hit.index);
     else this.setSelected({ kind: "edge", id: this.edges[hit.index].id });
-    return this.hitTest(sx, sy, slop);
+    return hit ? this.targetOf(hit.kind, hit.index) : { kind: "background" };
+  }
+
+  /** Selects drawn node i: a node of the data, or a collapsed group by its super node. */
+  selectDrawn(index: number) {
+    const n = this.nodes[index];
+    if (!n) return;
+    if (n.superOf !== null) this.setSelected({ kind: "group", id: n.superOf });
+    else this.setSelected({ kind: "node", id: n.id });
+  }
+
+  /** The drawn index of the primary selected node or group, or -1. */
+  private selectedIndex(): number {
+    const s = this.selected;
+    if (!s || s.kind === "edge") return -1;
+    return s.kind === "group" ? (this.supers.get(s.id)?.index ?? -1) : this.drawnIndex(s.id);
   }
 
   /** The ids of the nodes whose centers are inside a screen rectangle (its corners in any order). */
@@ -912,7 +1208,9 @@ export class GraphEngine {
     const a = this.screenToGraph(Math.min(x0, x1), Math.min(y0, y1));
     const b = this.screenToGraph(Math.max(x0, x1), Math.max(y0, y1));
     const out: string[] = [];
-    for (const n of this.nodes) if (n.x >= a.x && n.x <= b.x && n.y >= a.y && n.y <= b.y) out.push(n.id);
+    for (const n of this.nodes) {
+      if (n.superOf === null && n.x >= a.x && n.x <= b.x && n.y >= a.y && n.y <= b.y) out.push(n.id);
+    }
     return out;
   }
 
@@ -950,16 +1248,16 @@ export class GraphEngine {
     const f =
       this.hovered ??
       (this.selected
-        ? this.selected.kind === "node"
-          ? { kind: "node" as const, index: this.byId.get(this.selected.id)?.index ?? -1 }
+        ? this.selected.kind !== "edge"
+          ? { kind: "node" as const, index: this.selectedIndex() }
           : { kind: "edge" as const, index: this.edges.indexOf(this.edgeById.get(this.selected.id)!) }
         : null);
     if (!this.hovered && this.selectedNodes.size > 1) {
-      // Several nodes selected: all of them, their neighbors and their edges.
+      // Several nodes selected: all of them (or the super nodes of their groups), their neighbors and edges.
       const sel = new Set<number>();
       for (const id of this.selectedNodes) {
-        const n = this.byId.get(id);
-        if (n) sel.add(n.index);
+        const i = this.drawnIndex(id);
+        if (i >= 0) sel.add(i);
       }
       const nodes = new Set(sel);
       for (const i of sel) for (const j of this.nodes[i].neighbors) nodes.add(j);
@@ -983,10 +1281,13 @@ export class GraphEngine {
     return { nodes: new Set([e.source, e.target]), edges: new Set([f.index]) };
   }
 
-  /** The node nearest the selected one in a direction, for arrow-key navigation. */
+  /**
+   * The node nearest the selected one in a direction, for arrow-key navigation. A collapsed group's super
+   * node counts (`groupOfSuper` tells it by its id).
+   */
   nearestInDirection(dx: number, dy: number): GraphNode | null {
     if (this.nodes.length === 0) return null;
-    const sel = this.selected?.kind === "node" ? this.byId.get(this.selected.id) : undefined;
+    const sel = this.nodes[this.selectedIndex()] as EngineNode | undefined;
     if (!sel) {
       // Start from the node nearest the center of the view.
       const c = this.screenToGraph(this.width / 2, this.height / 2);
@@ -1077,13 +1378,14 @@ export class GraphEngine {
     this.dirty = true;
   }
 
+  /** Pins and their state apply to nodes of the data (hidden ones too) and to super nodes by their ids. */
   isPinned(id: string): boolean {
-    const n = this.byId.get(id);
+    const n = this.model.get(id) ?? this.byId.get(id);
     return !!n && n.fx !== null;
   }
 
   setPinned(id: string, pinned: boolean) {
-    const n = this.byId.get(id);
+    const n = this.model.get(id) ?? this.byId.get(id);
     if (!n) return;
     if (pinned) {
       n.fx = n.x;
@@ -1096,6 +1398,7 @@ export class GraphEngine {
   }
 
   unpinAll() {
+    for (const n of this.modelNodes) n.fx = n.fy = null;
     for (const n of this.nodes) n.fx = n.fy = null;
     if (this.options.layout === "force") this.sim.reheat(0.3);
     this.dirty = true;
@@ -1104,37 +1407,44 @@ export class GraphEngine {
   // -------------------------------------------------------------------------------------------
   // Inspection
 
+  /** A node of the data (members of collapsed groups too). */
   node(id: string): GraphNode | undefined {
-    return this.byId.get(id)?.node;
+    return this.model.get(id)?.node;
   }
 
+  /** A drawn node: a visible node of the data, or a super node by its id. */
   engineNode(id: string): EngineNode | undefined {
     return this.byId.get(id);
   }
 
+  /** Where a node is drawn: for a member of a collapsed group, where its super node is. */
   position(id: string): Pt | undefined {
-    const n = this.byId.get(id);
+    const n = this.nodes[this.drawnIndex(id)];
     return n ? { x: n.x, y: n.y } : undefined;
   }
 
+  /** A node's degree, neighbors and edges in the data, whatever is collapsed. */
   degree(id: string): number {
-    return this.byId.get(id)?.degree ?? 0;
+    return this.modelDegree.get(id) ?? 0;
   }
 
   neighborsOf(id: string): GraphNode[] {
-    const n = this.byId.get(id);
-    return n ? [...n.neighbors].map((i) => this.nodes[i].node) : [];
+    if (!this.model.has(id)) return [];
+    const seen = new Set<string>();
+    for (const e of this.modelEdges) {
+      if (e.from === id && e.to !== id) seen.add(e.to);
+      else if (e.to === id && e.from !== id) seen.add(e.from);
+    }
+    return [...seen].map((m) => this.model.get(m)!.node);
   }
 
   edgesOf(id: string): ResolvedEdge[] {
-    const n = this.byId.get(id);
-    if (!n) return [];
-    return this.edges.filter((e) => e.source === n.index || e.target === n.index).map((e) => e.edge);
+    return this.modelEdges.filter((e) => e.from === id || e.to === id);
   }
 
-  /** The key a node is colored by. */
+  /** The key a node is colored by (a super node: its group, or its members' most common category). */
   colorKey(n: EngineNode): string {
-    return this.options.colorBy === "group" ? (n.group ?? "") : n.category;
+    return this.options.colorBy === "group" ? (n.superOf ?? n.group ?? "") : n.category;
   }
 
   /** A node's fill: its own color, else its category's (or group's) palette slot. */
@@ -1190,11 +1500,14 @@ export class GraphEngine {
     return slot >= 0 ? palette[slot] : other;
   }
 
-  /** The categories (or groups) shown, in palette order, with their colors and node counts. */
+  /**
+   * The categories (or groups) shown, in palette order, with their colors and node counts. Members of
+   * collapsed groups count.
+   */
   legend(palette: readonly string[], other = OTHER): { key: string; color: string; count: number }[] {
     const counts = new Map<string, { color: string; count: number; slot: number }>();
     this.slots.setCapacity(palette.length);
-    for (const n of this.nodes) {
+    for (const n of this.modelNodes) {
       const key = this.colorKey(n);
       let entry = counts.get(key);
       if (!entry) {
@@ -1220,6 +1533,57 @@ export function mergeGraphData<N, E>(data: GraphData<N, E>, more: GraphData<N, E
   for (const e of data.edges) edges.set(edgeKey(e), e);
   for (const e of more.edges) edges.set(edgeKey(e), e);
   return { nodes: [...nodes.values()], edges: [...edges.values()] };
+}
+
+function newEngineNode(id: string, node: GraphNode): EngineNode {
+  return {
+    id,
+    index: 0,
+    node,
+    x: NaN,
+    y: NaN,
+    vx: 0,
+    vy: 0,
+    fx: null,
+    fy: null,
+    r: 0,
+    group: null,
+    degree: 0,
+    category: "",
+    neighbors: new Set(),
+    pinnedByData: false,
+    superOf: null,
+    members: 0,
+  };
+}
+
+/** The center of the nodes that have a position (NaN when none has). */
+function centroid(nodes: EngineNode[]): Pt {
+  let x = 0, y = 0, n = 0;
+  for (const m of nodes) {
+    if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
+    x += m.x;
+    y += m.y;
+    n++;
+  }
+  return n > 0 ? { x: x / n, y: y / n } : { x: NaN, y: NaN };
+}
+
+/** The category most of the nodes have (the first such in data order on a tie), or "". */
+function majorityCategory(nodes: EngineNode[]): string {
+  const counts = new Map<string, number>();
+  let best = "";
+  let bestCount = 0;
+  for (const n of nodes) {
+    if (n.category === "") continue;
+    const c = (counts.get(n.category) ?? 0) + 1;
+    counts.set(n.category, c);
+    if (c > bestCount) {
+      best = n.category;
+      bestCount = c;
+    }
+  }
+  return best;
 }
 
 function clamp(v: number, lo: number, hi: number) {

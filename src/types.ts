@@ -59,18 +59,39 @@ export interface ResolvedEdge<E = unknown> extends GraphEdge<E> {
 }
 
 /**
- * What is selected: one edge, or one or more nodes. With several nodes, `node` is the primary one (the
- * one selected last) and `nodes` lists them all in the order they were selected, `node` last.
+ * A group (community) of the graph: the nodes that share a `group` id. Collapsed, it is drawn as one
+ * super node standing for all its members.
+ */
+export interface GraphGroup<N = unknown> {
+  /** The nodes' `group` value. */
+  id: string;
+  /** What its hull and super node are captioned: the id unless `setGroupLabel` gave another. */
+  label: string;
+  /** Whether it is drawn as one super node. */
+  collapsed: boolean;
+  /** Its members, in data order (hidden ones too, while it is collapsed). */
+  nodes: GraphNode<N>[];
+}
+
+/**
+ * What is selected: one edge, one or more nodes, a collapsed group's super node, or a bundle of edges
+ * drawn as one (those between a collapsed group and another node or group). With several nodes, `node`
+ * is the primary one (the one selected last) and `nodes` lists them all in the order they were selected,
+ * `node` last. Selected nodes stay selected while their group is collapsed.
  */
 export type Selection<N = unknown, E = unknown> =
   | { kind: "node"; node: GraphNode<N>; nodes: GraphNode<N>[] }
   | { kind: "edge"; edge: ResolvedEdge<E> }
+  | { kind: "group"; group: GraphGroup<N> }
+  | { kind: "bundle"; edges: ResolvedEdge<E>[] }
   | null;
 
-/** What a pointer is over: a node, an edge or the background. */
+/** What a pointer is over: a node, an edge, a collapsed group, a bundle of edges or the background. */
 export type HitTarget<N = unknown, E = unknown> =
   | { kind: "node"; node: GraphNode<N> }
   | { kind: "edge"; edge: ResolvedEdge<E> }
+  | { kind: "group"; group: GraphGroup<N> }
+  | { kind: "bundle"; edges: ResolvedEdge<E>[] }
   | { kind: "background" };
 
 /** The layouts a view can run. */

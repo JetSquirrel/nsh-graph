@@ -19,6 +19,8 @@ model) and on [Neo4j NVL](https://neo4j.com/docs/nvl/current/) (data model, cont
   Hovering highlights neighbors. Arrow keys walk the graph; `+`/`-`/`0` zoom and fit; `p` pins; Esc clears.
 - **Drawing**: edges batched by state, with arrows; curved parallel edges and self loops; edge captions; community
   hulls; degree-based node sizing; captions inside or under nodes, with collision culling in `auto` mode.
+- **Communities**: [collapse a group](#communities) into one super node with its member count; edges to it are
+  bundled per direction and captioned `×N`. Double-tap (or Enter) expands it, members back where they were.
 - **Colors**: theme tokens (light and dark) plus a categorical palette validated for color-blind viewers. Its
   order is fixed and never cycled; categories past the eighth share a neutral gray. A category keeps its color
   when others are filtered out.
@@ -116,8 +118,9 @@ interface GraphEdge<T> { id?: string; from: string; to: string; caption?: string
 | `minZoom` / `maxZoom` | `0.05` / `6` | |
 | `colors` | theme | `background`, `text`, `surface`, `edge`, `edgeHighlight`, `edgeText`, `selection`, `palette`, `other`. |
 | `fontFamily` | `"system-ui"` | |
-| `onSelectionChange(selection)` | | `{ kind: "node", node, nodes }` (`node` is the one selected last, `nodes` all of them), `{ kind: "edge", edge }` or `null`. |
+| `onSelectionChange(selection)` | | `{ kind: "node", node, nodes }` (`node` is the one selected last, `nodes` all of them), `{ kind: "edge", edge }`, `{ kind: "group", group }` (a super node), `{ kind: "bundle", edges }` or `null`. |
 | `onNodeActivate(node)` | | Double-tap, double-click or Enter. |
+| `onGroupToggle(group, collapsed)` | | A group was collapsed or expanded. |
 | `onHover(target)` | | Desktops and the web. |
 | `onContextMenu(target, { position, pagePosition })` | | Open a menu with `Menu.popup(items, e.pagePosition)` from `nsh/desktop`. |
 | `style`, `class`, `testID`, `accessibilityLabel` | | |
@@ -132,8 +135,34 @@ graph.select(id, { center: true });  graph.selectEdge(id);  graph.clearSelection
 graph.selectNodes(ids, "add");  graph.selectAll();  graph.selectedIds();  graph.isSelected(id);  graph.fitSelection();
 graph.relayout();  graph.setPinned(id, true);  graph.isPinned(id);  graph.unpinAll();
 graph.node(id);  graph.position(id);  graph.degree(id);  graph.neighbors(id);  graph.edgesOf(id);
+graph.groups();   // reactive
+graph.collapseGroup(id);  graph.expandGroup(id);  graph.toggleGroup(id);  graph.collapseAllGroups();  graph.expandAllGroups();
+graph.isCollapsed(id);  graph.group(id);  graph.selectGroup(id);  graph.setGroupLabel(id, "Harbor crew");
 const png = await graph.toImage({ scale: 2 });   // Blob
 ```
+
+### Communities
+
+Nodes that share a `group` (a community from Louvain, say) form a group. `graph.collapseGroup(id)` draws the
+group as one super node: bigger than the other nodes, with a double ring, its member count inside and its label
+under it. Edges between the group and another node or group are bundled into one per direction, drawn thicker
+and captioned `×N`, even without `edgeLabels`. Edges inside the group are hidden. A super node starts at its
+members' center. When it expands, by double-tap, Enter or `expandGroup`, the members come back around wherever it
+was dragged, placed as they were.
+
+Collapsing changes only what is drawn:
+
+- `node`, `degree`, `neighbors`, `edgesOf` and the legend still describe the whole graph.
+- Colors stay the same: with `colorBy="group"` a super node has its group's color, and with `"category"` it has
+  the color of its members' most common category.
+- Selected members stay selected while their group is collapsed, and their super node shows the ring.
+- A selected super node is `{ kind: "group", group }`, with `group.nodes` listing its members. A selected bundle
+  is `{ kind: "bundle", edges }`.
+- New members that arrive in `data` while the group is collapsed join it hidden. A group that no node has any
+  more is no longer collapsed.
+
+`graph.groups()` lists the groups with their members and whether each is collapsed, for a community list.
+Hosts that switch on `selection.kind` or `target.kind` should handle `"group"` and `"bundle"`.
 
 ### Without the view
 
@@ -286,7 +315,6 @@ with `nsh upgrade nsh-graph`.
 
 ## Roadmap
 
-- Collapsing communities into super nodes (as gpui-graph does)
 - Lasso selection (box selection is in)
 - Edge bundling and level-of-detail rendering for graphs of several thousand nodes
 - Keep positions in Rust between ticks, so a native tick no longer copies every node through JS
