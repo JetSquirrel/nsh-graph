@@ -6,7 +6,7 @@
 import { signal, OffscreenCanvas, Path2D, type Accessor } from "nsh";
 import type { GraphEngine } from "./engine";
 import { renderGraph, type RenderTheme } from "./render";
-import type { GraphNode, ResolvedEdge, Selection } from "./types";
+import type { GraphGroup, GraphNode, ResolvedEdge, Selection } from "./types";
 
 export interface LegendEntry {
   /** The category (or group) name; "" for nodes without one. */
@@ -38,6 +38,14 @@ export class GraphController {
       a.length === b.length && a.every((x, i) => x.key === b[i].key && x.color === b[i].color && x.count === b[i].count),
   });
   private readonly settlingSignal = signal(false);
+  private readonly groupsSignal = signal<GraphGroup[]>([], {
+    equals: (a, b) =>
+      a.length === b.length &&
+      a.every((x, i) => x.id === b[i].id && x.label === b[i].label && x.collapsed === b[i].collapsed && x.nodes.length === b[i].nodes.length),
+  });
+
+  /** The groups (communities) in the data, in the order they first appear, and whether each is collapsed. Reactive. */
+  readonly groups: Accessor<GraphGroup[]> = () => this.groupsSignal();
 
   /** What is selected. */
   readonly selection: Accessor<Selection> = () => this.selectionSignal();
@@ -64,8 +72,9 @@ export class GraphController {
   }
 
   /** @internal State `GraphView` reports after each frame. */
-  _report(state: { selection?: Selection; zoom?: number; legend?: LegendEntry[]; settling?: boolean }) {
+  _report(state: { selection?: Selection; zoom?: number; legend?: LegendEntry[]; settling?: boolean; groups?: GraphGroup[] }) {
     if (state.selection !== undefined) this.selectionSignal.set(state.selection);
+    if (state.groups !== undefined) this.groupsSignal.set(state.groups);
     if (state.zoom !== undefined) this.zoomSignal.set(Math.round(state.zoom * 1000) / 1000);
     if (state.legend !== undefined) this.legendSignal.set(state.legend);
     if (state.settling !== undefined) this.settlingSignal.set(state.settling);
@@ -136,9 +145,9 @@ export class GraphController {
     this.run((e) => e.selectNodes(ids, mode));
   }
 
-  /** Selects every node. */
+  /** Selects every node (members of collapsed groups too). */
   selectAll() {
-    this.run((e) => e.selectNodes(e.nodes.map((n) => n.id)));
+    this.run((e) => e.selectNodes(e.nodeIds()));
   }
 
   /** The selected nodes' ids, in the order they were selected (the primary one last). Reactive. */
@@ -156,6 +165,7 @@ export class GraphController {
   /** Fits the selected nodes in view (the whole graph when none are). */
   fitSelection() {
     this.run((e) => {
+      if (e.selected?.kind === "group") return e.fitNodes([e.superId(e.selected.id)]);
       if (e.selectedNodes.size === 0) return e.fit(true);
       e.fitNodes(e.selectedNodes);
     });
@@ -168,6 +178,57 @@ export class GraphController {
 
   clearSelection() {
     this.select(null);
+  }
+
+  /** Selects a collapsed group's super node. */
+  selectGroup(id: string) {
+    this.run((e) => e.setSelected({ kind: "group", id }));
+  }
+
+  // ---- Groups
+
+  /**
+   * Collapses a group into one super node, which shows its member count. Edges to and from it are
+   * bundled per direction and captioned `×N`; edges inside it are hidden. The data is unchanged: `node`,
+   * `degree`, `neighbors` and the legend still describe the whole graph, and selected members stay selected.
+   */
+  collapseGroup(id: string) {
+    this.run((e) => e.setGroupsCollapsed([id], true));
+  }
+
+  /** Expands a collapsed group: its members come back around the super node, placed as they were. */
+  expandGroup(id: string) {
+    this.run((e) => e.setGroupsCollapsed([id], false));
+  }
+
+  toggleGroup(id: string) {
+    this.run((e) => e.toggleGroup(id));
+  }
+
+  /** Collapses every group: an overview with one node per community. */
+  collapseAllGroups() {
+    this.run((e) => e.setGroupsCollapsed(null, true));
+  }
+
+  expandAllGroups() {
+    this.run((e) => e.setGroupsCollapsed(null, false));
+  }
+
+  isCollapsed(id: string): boolean {
+    return this.engine?.isCollapsed(id) ?? false;
+  }
+
+  /** A group with its members, or undefined when no node has it. */
+  group(id: string): GraphGroup | undefined {
+    return this.engine?.group(id);
+  }
+
+  /** What a group's hull and super node are captioned; null goes back to its id. */
+  setGroupLabel(id: string, label: string | null) {
+    this.run((e) => {
+      e.setGroupLabel(id, label);
+      this._report({ groups: e.groups() });
+    });
   }
 
   // ---- Layout and pinning

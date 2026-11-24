@@ -71,6 +71,19 @@ function App() {
         lines: [`${graph.node(sel.edge.from)?.caption} → ${graph.node(sel.edge.to)?.caption}`],
       };
     }
+    if (sel.kind === "group") {
+      return {
+        title: `${sel.group.label} (collapsed)`,
+        lines: [
+          `${sel.group.nodes.length} nodes: ${sel.group.nodes.map((m) => m.caption ?? m.id).join(", ")}`,
+          "Double-click or press Enter to expand.",
+        ],
+      };
+    }
+    if (sel.kind === "bundle") {
+      const types = [...new Set(sel.edges.map((e) => e.caption ?? "edge"))].join(", ");
+      return { title: `${sel.edges.length} edges`, lines: [types] };
+    }
     const n = sel.node;
     const d = n.data as Props | undefined;
     return {
@@ -125,6 +138,8 @@ function App() {
             accessibilityLabel="Film graph"
             testID="graph"
             onNodeActivate={(node) => expand(node.id)}
+            onGroupToggle={(group, collapsed) =>
+              status.set(`${collapsed ? "Collapsed" : "Expanded"} ${group.label} (${group.nodes.length} nodes).`)}
             onContextMenu={(target) => {
               if (target.kind === "node") {
                 const pinned = graph.isPinned(target.node.id);
@@ -144,6 +159,29 @@ function App() {
           style={wide() ? { width: 300, borderLeftWidth: 1 } : { borderTopWidth: 1, maxHeight: 260 }}
         >
           <GraphLegend controller={graph} />
+          <If when={graph.groups().length > 0}>
+            {() => (
+              <View class="gap-1">
+                <Row>
+                  <Text class="text-sm font-semibold text-foreground mr-1">Groups</Text>
+                  <Button label="Collapse all" onPress={() => graph.collapseAllGroups()} testID="collapse-all" />
+                  <Button label="Expand all" onPress={() => graph.expandAllGroups()} testID="expand-all" />
+                </Row>
+                <Row>
+                  <Each of={graph.groups()} key={(g) => g.id}>
+                    {(g) => (
+                      <Button
+                        label={`${g().label} · ${g().nodes.length}`}
+                        active={g().collapsed}
+                        onPress={() => graph.toggleGroup(g().id)}
+                        testID={`group-${g().id}`}
+                      />
+                    )}
+                  </Each>
+                </Row>
+              </View>
+            )}
+          </If>
           <If when={details()} else={<Text class="text-sm text-muted-foreground">Select a node or an edge.</Text>}>
             {(d) => (
               <View class="gap-1" testID="details">

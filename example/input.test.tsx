@@ -79,3 +79,27 @@ test("Shift + arrow keys add the next node, Ctrl/⌘ + A selects every node, Esc
   await app.keyboard.press("escape");
   await app.waitFor("text:selected: none");
 });
+
+test("a collapsed group is one super node: a tap selects it, a double-tap expands it", async () => {
+  const app = await open("./fixtures/Group.tsx");
+  await app.waitFor("id:graph");
+  await app.waitFor("text:groups: g=expanded");
+  await app.press("id:collapse");
+  await app.waitFor("text:groups: g=collapsed");
+  expect(app.shows("text:toggles: g:true")).toBe(true);
+  await app.wait(300);
+  // The super node is the only node left, in the middle of the view.
+  const start = Date.now();
+  await app.drag("id:graph", {});
+  await app.waitFor("text:selected: group g");
+  if (Date.now() - start > 250) {
+    // Real hosts take about half a second to send a tap, too slow for two to make a double-tap (350 ms).
+    console.log("skipped: taps are too slow here for a double-tap");
+    return;
+  }
+  await app.drag("id:graph", {}); // a second tap right after: a double-tap
+  await app.waitFor("text:groups: g=expanded");
+  expect(app.shows("text:toggles: g:true,g:false")).toBe(true);
+  // The expanded group's selection is let go.
+  expect(app.shows("text:selected: none")).toBe(true);
+});

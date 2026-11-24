@@ -12,6 +12,7 @@ export type {
   GraphEdge,
   GraphData,
   ResolvedEdge,
+  GraphGroup,
   Selection,
   HitTarget,
   LayoutKind,

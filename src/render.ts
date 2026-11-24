@@ -54,6 +54,9 @@ export interface RenderTheme {
 }
 
 const DIM = 0.18;
+/** A super node's inner ring: how far inside its edge, and how wide, in graph units (it zooms with the node). */
+const SUPER_RING_INSET = 5;
+const SUPER_RING_WIDTH = 2;
 const widthCache = new Map<string, number>();
 /** Scratch space for `renderGraph`: the straight edges' arrow tips (x, y and angle per edge). */
 let tipBuffer = new Float64Array(0);
@@ -122,13 +125,17 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   const { fills, distinct, rank } = engine.nodeColors(theme.palette, theme.other);
   const focus = engine.focus();
   const selectedId = engine.selected;
-  const selNode = selectedId?.kind === "node" ? engine.engineNode(selectedId.id)?.index ?? -1 : -1;
-  // Every selected node (the primary one among them).
+  const selNode =
+    selectedId?.kind === "node" ? engine.drawnIndex(selectedId.id)
+    : selectedId?.kind === "group" ? engine.drawnIndex(engine.superId(selectedId.id))
+    : -1;
+  // Every selected node (the primary one among them); a selected member of a collapsed group rings its super node.
   const selNodes = new Set<number>();
   for (const id of engine.selectedNodes) {
-    const i = engine.engineNode(id)?.index;
-    if (i !== undefined) selNodes.add(i);
+    const i = engine.drawnIndex(id);
+    if (i >= 0) selNodes.add(i);
   }
+  if (selectedId?.kind === "group" && selNode >= 0) selNodes.add(selNode);
   const hoverNode = engine.hovered?.kind === "node" ? engine.hovered.index : -1;
   const hoverEdge = engine.hovered?.kind === "edge" ? engine.hovered.index : -1;
   const selEdge = selectedId?.kind === "edge" ? edges.findIndex((e) => e.id === selectedId.id) : -1;
@@ -382,6 +389,20 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
       else cx.stroke();
     }
   }
+  // Super nodes (collapsed groups) are drawn as a double ring: a ring of the surface color inside the fill.
+  const supers: number[] = [];
+  if (engine.supersShown > 0) {
+    for (let i = 0; i < nodes.length; i++) if (nodes[i].superOf !== null && inView[i] === 1) supers.push(i);
+  }
+  for (const i of supers) {
+    const n = nodes[i];
+    cx.globalAlpha = focus !== null && !focus.nodes.has(i) ? DIM + 0.1 : 1;
+    cx.beginPath();
+    cx.arc(n.x, n.y, Math.max(1, n.r - SUPER_RING_INSET), 0, Math.PI * 2);
+    cx.strokeStyle = theme.surface;
+    cx.lineWidth = SUPER_RING_WIDTH;
+    cx.stroke();
+  }
   cx.globalAlpha = 1;
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i];
@@ -431,7 +452,7 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
       for (const i of members) pad = Math.max(pad, nodes[i].r);
       const top = hullTop(convexHull(members.map((i) => nodes[i])), pad + 12);
       const p = engine.graphToScreen(top.x, top.y);
-      haloText(cx, truncate(group, 32), p.x, p.y - 3, theme.text, theme.surface);
+      haloText(cx, truncate(engine.groupLabel(group), 32), p.x, p.y - 3, theme.text, theme.surface);
     }
   }
 
@@ -446,7 +467,9 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   const byPriority = new Map<number, number[]>();
   const emphasizedAny = selNode >= 0 || hoverNode >= 0 || focus !== null;
   const anyCaption = options.labelMode !== "never" && (!auto || emphasizedAny || maxR * k >= 9);
-  if (anyCaption || options.edgeLabels) {
+  // Edge bundles are captioned with their count even without edgeLabels.
+  const edgeText = options.edgeLabels || engine.bundleCount > 0;
+  if (anyCaption || edgeText) {
     for (let i = 0; i < nodes.length; i++) {
       if (inView[i] === 0) continue;
       onScreen.push(i);
@@ -464,7 +487,7 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
   // More captions than this cannot be read anyway; the busiest nodes keep theirs.
   if (auto && order.length > 300) order.length = 300;
   const occupied = new RectGrid(48);
-  if (auto && (order.length > 0 || options.edgeLabels)) {
+  if (auto && (order.length > 0 || edgeText)) {
     // Nodes are obstacles (a little smaller than drawn, so captions may graze them).
     for (const i of onScreen) {
       const r = nodes[i].r * k * 0.85;
@@ -473,6 +496,21 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
       occupied.add({ x0: x - r, y0: y - r, x1: x + r, y1: y + r, owner: i });
     }
   }
+
+  // A super node shows how many nodes it holds, inside it (its caption goes under it).
+  for (const i of supers) {
+    const n = nodes[i];
+    const sr = n.r * k;
+    if (sr < 7) continue;
+    const size = Math.max(9, Math.min(18, sr * 0.55));
+    cx.font = `700 ${size.toFixed(1)}px ${theme.fontFamily}`;
+    cx.textAlign = "center";
+    cx.textBaseline = "middle";
+    cx.globalAlpha = focus !== null && !focus.nodes.has(i) ? DIM + 0.3 : 1;
+    cx.fillStyle = inkOn(fills[i]);
+    cx.fillText(String(n.members), n.x * k + tx, n.y * k + ty, sr * 1.4);
+  }
+  cx.globalAlpha = 1;
 
   if (anyCaption) {
     for (const i of order) {
@@ -484,7 +522,7 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
       const caption = truncate(n.node.caption ?? n.id);
       const p = { x: n.x * k + tx, y: n.y * k + ty };
       // Inside the node when it is big enough to hold the caption, under it otherwise.
-      if (sr >= 16) {
+      if (sr >= 16 && n.superOf === null) {
         const size = Math.max(10, Math.min(14, sr * 0.36));
         const font = `600 ${size.toFixed(1)}px ${theme.fontFamily}`;
         cx.font = font;
@@ -509,14 +547,18 @@ export function renderGraph(cx: Ctx2D, engine: GraphEngine, theme: RenderTheme, 
     }
   }
 
-  if (options.edgeLabels) {
+  if (edgeText) {
     const font = `10px ${theme.fontFamily}`;
     cx.font = font;
     cx.textAlign = "center";
     cx.textBaseline = "middle";
     // Highlighted edges first, so theirs win the space.
     const candidates: number[] = [];
-    for (let i = 0; i < edges.length; i++) if (edges[i].edge.caption && state(i) !== 0) candidates.push(i);
+    for (let i = 0; i < edges.length; i++) {
+      const e = edges[i];
+      if (!e.edge.caption || state(i) === 0) continue;
+      if (options.edgeLabels || (e.bundle !== null && e.bundle.length > 1)) candidates.push(i);
+    }
     candidates.sort((a, b) => state(b) - state(a) || a - b);
     for (const i of candidates) {
       const st = state(i);
