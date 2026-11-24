@@ -41,6 +41,16 @@ export interface NativeGraphPainter {
   traceEdges(states: Uint8Array, style: number[]): string[];
   /** `view`: x0, y0, x1, y1, then optionally decimals (0 to 2, default 2). */
   traceNodes(keys: Uint8Array, batches: number, view: number[]): string[];
+  /**
+   * The renderer's node pass in Rust (optional): `setRanks` (one u32 color rank per node) when the colors
+   * change, then each frame `frameNodes(focus, colors, style)` with the focus's node indices (u32; empty:
+   * no focus) and `style` = x0, y0, x1, y1, decimals, zoom, ring radius and level-of-detail radius (in
+   * points). It returns 2 × colors paths, dimmed batches first; `frameInfo` then gives one u8 per node
+   * (in view) and one per batch (ringed).
+   */
+  setRanks?(ranks: Uint8Array): void;
+  frameNodes?(focus: Uint8Array, colors: number, style: number[]): string[];
+  frameInfo?(): Uint8Array;
 }
 
 /** The module `nsh-graph/native` exports. */

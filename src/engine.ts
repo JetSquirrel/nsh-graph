@@ -214,6 +214,13 @@ export class GraphEngine {
   /** Bumped when radii change; the painter's radii are as of `paintedRadii`. */
   private radiiVersion = 0;
   private paintedRadii = -1;
+  /** The color ranks the painter has (`setRanks`), by identity: `nodeColors` makes new ones when colors change. */
+  paintedRanks: Uint32Array | null = null;
+  /** The biggest radius, as of `radiiVersion`. */
+  private maxR = { version: -1, value: 0 };
+  /** Bumped when nodes may have been pinned or released; the pinned nodes' indices as of `pinned.stamp`. */
+  private pinStamp = 0;
+  private pinned = { stamp: -1, indices: [] as number[] };
 
   constructor(options: Partial<EngineOptions> = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -420,6 +427,7 @@ export class GraphEngine {
       }
     }
     this.sim.setGraph(nodes, edges.map((e) => ({ source: e.source, target: e.target })));
+    this.pinStamp++;
 
     // Keep hover and selection when their target is still there. Selected nodes stay selected while
     // their group is collapsed; an edge bundled away, or a group expanded, is let go.
@@ -1347,6 +1355,7 @@ export class GraphEngine {
         m.fy = m.y;
       }
     }
+    this.pinStamp++;
     this.draggedChanged();
     if (this.options.layout === "force") {
       this.sim.alphaTarget = 0.3;
@@ -1390,6 +1399,7 @@ export class GraphEngine {
       }
     }
     if (n) this.draggedChanged();
+    this.pinStamp++;
     this.dragging = -1;
     this.sim.alphaTarget = 0;
     this.dragGroup = [];
@@ -1415,6 +1425,7 @@ export class GraphEngine {
     }
     // A hidden member of a collapsed group is not in the layout; its pin goes over when it is drawn again.
     if (this.nodes[n.index] === n) this.sim.changed(n.index);
+    this.pinStamp++;
     this.dirty = true;
   }
 
@@ -1422,6 +1433,7 @@ export class GraphEngine {
     for (const n of this.modelNodes) n.fx = n.fy = null;
     for (const n of this.nodes) n.fx = n.fy = null;
     this.sim.changedAll();
+    this.pinStamp++;
     if (this.options.layout === "force") this.sim.reheat(0.3);
     this.dirty = true;
   }
@@ -1494,6 +1506,28 @@ export class GraphEngine {
     // The slots' version after the lookups, which may have given slots to keys first seen.
     this.colorCache = { palette, other, stamp: this.colorStamp, slots: this.slots.version, colors };
     return colors;
+  }
+
+  /** The biggest node radius drawn (kept until radii change: a frame does not look at every node for it). */
+  maxRadius(): number {
+    if (this.maxR.version !== this.radiiVersion) {
+      let m = 0;
+      for (const n of this.nodes) if (n.r > m) m = n.r;
+      this.maxR = { version: this.radiiVersion, value: m };
+    }
+    return this.maxR.value;
+  }
+
+  /** The drawn nodes that are pinned, by index (kept until a pin changes). */
+  pinnedIndices(): number[] {
+    if (this.pinned.stamp !== this.pinStamp) {
+      const indices: number[] = [];
+      this.nodes.forEach((n, i) => {
+        if (n.fx !== null) indices.push(i);
+      });
+      this.pinned = { stamp: this.pinStamp, indices };
+    }
+    return this.pinned.indices;
   }
 
   /** Hands the nodes' positions and radii to the painter, unless it has them already. */

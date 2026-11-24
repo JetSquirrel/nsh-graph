@@ -299,6 +299,90 @@ describe("the Rust layout keeping its state", () => {
   }, 180_000);
 });
 
+
+/** The painter without its node pass and level of detail (`frameNodes`), as before them. */
+function withoutFrame(engine: GraphEngine) {
+  const p = engine.painter!;
+  (engine as unknown as { painter: unknown }).painter = {
+    setEdges: (e: Uint8Array) => p.setEdges(e),
+    setNodes: (n: Uint8Array) => p.setNodes(n),
+    setPositions: (b: Uint8Array) => p.setPositions!(b),
+    traceEdges: (s: Uint8Array, st: number[]) => p.traceEdges(s, st.slice(0, 7)),
+    traceNodes: (k: Uint8Array, b: number, v: number[]) => p.traceNodes(k, b, v),
+  };
+}
+
+describe("the node pass and level of detail in Rust", () => {
+  test("zoomed in, where no detail is left out, the node paths are what the JS node pass traced", async () => {
+    const data = datasets.find((d) => d.id === "miserables")!.data();
+    const rs = engineFor(data, true);
+    await settle(rs);
+    rs.fit(false);
+    rs.setZoom(rs.k * 2);
+    rs.step(1e9);
+    const nodePaths: string[][] = [];
+    const record = (e: GraphEngine, name: string) => {
+      const p = e.painter! as unknown as Record<string, (...a: unknown[]) => unknown>;
+      const f = p[name];
+      p[name] = (...a: unknown[]) => {
+        const r = f.apply(p, a) as string[];
+        nodePaths.push(r);
+        return r;
+      };
+    };
+    const canvas = new OffscreenCanvas(1000, 700);
+    const cx = canvas.getContext("2d") as unknown as Ctx2D;
+    record(rs, "frameNodes");
+    renderGraph(cx, rs, THEME, 1000, 700, PATHS);
+    withoutFrame(rs);
+    record(rs, "traceNodes");
+    rs.geometryVersion++;
+    renderGraph(cx, rs, THEME, 1000, 700, PATHS);
+    expect(nodePaths.length).toBe(2);
+    expect(nodePaths[0].join("|").length).toBeGreaterThan(1000);
+    expect(nodePaths[0]).toEqual(nodePaths[1]);
+  }, 60_000);
+
+  test("frame cost, 5000 nodes: the JS node pass against Rust's, with level of detail", async () => {
+    const data = scaleFree(5000, 2);
+    const a = engineFor(data, true);
+    await settle(a);
+    const b = engineFor(data, true);
+    b.nodes.forEach((n, i) => {
+      n.x = a.nodes[i].x;
+      n.y = a.nodes[i].y;
+    });
+    b.sim.changedAll(true);
+    b.geometryVersion++;
+    withoutFrame(b);
+    const canvas = new OffscreenCanvas(1000, 700);
+    const cx = canvas.getContext("2d") as unknown as Ctx2D;
+    const sizes: string[] = [];
+    for (const zoom of [1, 3, 8]) {
+      for (const e of [a, b]) {
+        e.fit(false);
+        e.setZoom(e.k * zoom);
+        e.step(1e9);
+      }
+      const draw = (e: GraphEngine) => () => {
+        e.geometryVersion++;
+        renderGraph(cx, e, THEME, 1000, 700, PATHS);
+      };
+      draw(a)();
+      draw(b)();
+      let before = Infinity, after = Infinity;
+      for (let round = 0; round < 5; round++) {
+        before = Math.min(before, await timed(3, draw(b)));
+        after = Math.min(after, await timed(3, draw(a)));
+      }
+      const node = a.maxRadius() * a.k;
+      rows.push(`frame 5000 at zoom ${a.k.toFixed(2)} (biggest node ${node.toFixed(1)} px) ${before.toFixed(1).padStart(5)} → ${after.toFixed(1).padStart(5)} ms`);
+      sizes.push(`${a.k.toFixed(2)}`);
+      expect(after).toBeLessThan(before);
+    }
+  }, 180_000);
+});
+
 describe("TypeScript and Rust layouts", () => {
   for (const id of ids) {
     test(id, async () => {

@@ -244,8 +244,11 @@ batched painting. It moves the two hot paths out of QuickJS:
   it changed (a dragged or pinned node, or every node after a layout jumps), and a tick returns only
   positions, which the painter takes as they are.
 - **`GraphPainter`**: edges and nodes traced as SVG path data, one path per state and color, that the canvas
-  draws with a handful of `Path2D` calls instead of several calls per edge and node. Arrows, captions,
-  rings and hulls are unchanged.
+  draws with a handful of `Path2D` calls instead of several calls per edge and node. The frame's node pass
+  runs there too (which nodes are in view, their color batches and rings), with level of detail: nodes
+  under 1.5 points on screen become squares, one per pixel and color; edges hidden under their nodes or
+  shorter than a third of a point are left out; and zoomed out, edges along the same pixels are traced once.
+  Arrows, captions, selection rings and hulls are unchanged.
 
 It is opt-in: register it once at startup.
 
@@ -272,12 +275,14 @@ Measured in NSH's headless runtime (`nsh test perf`), TypeScript → Rust:
 |---|---|---|---|
 | Flare imports, 220 / 764 | 7.4 → 0.3 ms | 2.0 → 0.06 s | |
 | Star, 301 / 300 | 9.8 → 0.5 ms | 2.7 → 0.10 s | |
-| Scale-free, 1500 / 2997 | 43 → 2.2 ms | 12 → 0.56 s | 8.8 → 3.2 ms |
-| Scale-free, 5000 / 9997 | 165 → 9 ms | (minutes) → 2.5 s | 34 → 11 ms |
+| Scale-free, 1500 / 2997 | 43 → 2.2 ms | 12 → 0.56 s | 8 → 2.2 ms |
+| Scale-free, 5000 / 9997 | 165 → 9 ms | (minutes) → 2.5 s | 32 → 7 ms |
 
 Edge-length spread and crowding are the same both ways. Keeping the state in Rust took a 5000-node tick from
-12.8 to 8.3 ms, and a tick with the painter's positions from 14.3 to 8.8 ms, measured side by side in one
-process; most of what is left is the many-body force. `nsh run perf` shows 1500 to 10000 nodes either way.
+12.8 to 8.3 ms, and a tick with the painter's positions from 14.3 to 8.8 ms; the node pass and level of
+detail took about a quarter off a 5000-node frame (16–32% over four runs, at every zoom). Both measured side
+by side in one process. Most of a tick is now the many-body force, and most of a zoomed-in frame the
+captions. `nsh run perf` shows 1500 to 10000 nodes either way.
 
 ## Compared with other libraries
 
@@ -323,7 +328,8 @@ with `nsh upgrade nsh-graph`.
 ## Roadmap
 
 - Lasso selection (box selection is in)
-- Edge bundling and level-of-detail rendering for graphs of several thousand nodes
+- Edge bundling for graphs of several thousand nodes (level of detail is in)
+- Cheaper captions when zoomed in on big graphs: placing them is now most of such a frame
 
 ## License
 

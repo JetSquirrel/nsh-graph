@@ -87,7 +87,16 @@ pub struct EdgeStyle {
     pub arrow_len: f64,
     /// The most decimals a coordinate gets (0 to 2): fewer when zoomed out, where they cannot be seen.
     pub decimals: u32,
+    /// Screen points per graph unit, for level of detail; 0 turns it off. With it, straight edges hidden
+    /// under their nodes or shorter than a fraction of a point are left out, and when zoomed out (under
+    /// `DEDUPE_BELOW`) straight edges that land on the same screen pixels are traced once.
+    pub scale: f64,
 }
+
+/// A straight edge whose visible part is shorter than this on screen, in points, is not traced.
+pub const MIN_EDGE_PX: f64 = 0.35;
+/// Below this zoom, straight edges ending in the same screen pixels are traced once.
+pub const DEDUPE_BELOW: f64 = 0.5;
 
 /// One state's edges: their strokes, and their arrow heads to fill.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -181,6 +190,12 @@ pub fn trace_edges(edges: &[Edge], states: &[u8], x: &[f64], y: &[f64], r: &[f64
     let mut out: [EdgeBatch; 3] = Default::default();
     let n = x.len();
     let spread = 0.42f64;
+    let k = style.scale;
+    let lod = k > 0.;
+    // Pixels already traced, per state: (state, x0, y0, x1, y1) in whole screen points. Arrows point one
+    // way, so with them an edge and its reverse stay apart.
+    let dedupe = lod && k < DEDUPE_BELOW;
+    let mut seen: std::collections::HashSet<(u8, i32, i32, i32, i32)> = std::collections::HashSet::new();
     for (i, e) in edges.iter().enumerate() {
         let state = states.get(i).copied().unwrap_or(255);
         if state > 2 {
@@ -194,9 +209,29 @@ pub fn trace_edges(edges: &[Edge], states: &[u8], x: &[f64], y: &[f64], r: &[f64
         if !may_touch(&style.view, s, r[si], t, r[ti], e) {
             continue;
         }
+        let shape = edge_shape(s, r[si], t, r[ti], e.bend, e.self_loop, e.loop_index);
+        if lod {
+            if let Shape::Line { a, b, .. } = shape {
+                // The node circles overlap or the line is too short to see: it is under the nodes.
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let visible = (t.x - s.x).hypot(t.y - s.y) > r[si] + r[ti];
+                if !visible || dx.hypot(dy) * k < MIN_EDGE_PX {
+                    continue;
+                }
+                if dedupe {
+                    let q = |v: f64| (v * k).round() as i32;
+                    let (mut p0, mut p1) = ((q(a.x), q(a.y)), (q(b.x), q(b.y)));
+                    if !style.arrows && p1 < p0 {
+                        std::mem::swap(&mut p0, &mut p1);
+                    }
+                    if !seen.insert((state, p0.0, p0.1, p1.0, p1.1)) {
+                        continue;
+                    }
+                }
+            }
+        }
         let batch = &mut out[state as usize];
         let mut lines = PathData { s: &mut batch.lines, decimals: style.decimals };
-        let shape = edge_shape(s, r[si], t, r[ti], e.bend, e.self_loop, e.loop_index);
         let (b, end_angle) = match shape {
             Shape::Line { a, b, end_angle } => {
                 // Stop the line under the arrow head, so its butt does not poke through the tip.
@@ -271,9 +306,165 @@ pub fn trace_nodes(keys: &[u32], batches: usize, x: &[f64], y: &[f64], r: &[f64]
     out
 }
 
+/// How `frame_nodes` draws a frame's nodes.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameStyle {
+    /// Graph-space rectangle on screen (with a margin); nodes outside it are left out.
+    pub view: Rect,
+    pub decimals: u32,
+    /// Screen points per graph unit.
+    pub scale: f64,
+    /// A batch with a node at least this big on screen (radius, in points) gets its separating ring.
+    pub ring_px: f64,
+    /// Nodes smaller than this on screen (radius, in points) are traced as squares, once per screen pixel
+    /// and batch: at that size a circle and a square look the same, and many nodes share a pixel.
+    pub lod_px: f64,
+}
+
+/// A frame's nodes: one path per batch, and what the renderer needs to know of them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NodeFrame {
+    pub paths: Vec<String>,
+    /// 1 for each node in view.
+    pub in_view: Vec<u8>,
+    /// 1 for each batch that gets a separating ring.
+    pub ringed: Vec<u8>,
+}
+
+/// The renderer's node pass, done here: which nodes are in view, which batch each goes in (its color's
+/// rank among `colors`, dimmed unless in `focus` when there is a focus: batch b < colors holds dimmed
+/// nodes, the rest the others), which batches get a ring, and their paths.
+pub fn frame_nodes(ranks: &[u32], focus: Option<&[bool]>, colors: usize, x: &[f64], y: &[f64], r: &[f64], style: &FrameStyle) -> NodeFrame {
+    let n = x.len().min(y.len()).min(r.len());
+    let batches = colors * 2;
+    let mut frame = NodeFrame { paths: vec![String::new(); batches], in_view: vec![0; n], ringed: vec![0; batches] };
+    let (v, k, d) = (&style.view, style.scale, style.decimals);
+    let mut seen: std::collections::HashSet<(usize, i64, i64)> = std::collections::HashSet::new();
+    let (mut b0, mut b1, mut b2, mut b3) = ([0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32]);
+    for i in 0..n {
+        let (cx, cy) = (x[i], y[i]);
+        if !(cx >= v.x0 && cx <= v.x1 && cy >= v.y0 && cy <= v.y1) {
+            continue;
+        }
+        frame.in_view[i] = 1;
+        let rank = ranks.get(i).copied().unwrap_or(u32::MAX) as usize;
+        if rank >= colors {
+            continue;
+        }
+        let dimmed = focus.is_some_and(|f| !f.get(i).copied().unwrap_or(false));
+        let b = if dimmed { 0 } else { colors } + rank;
+        let rr = r[i].max(0.);
+        let sr = rr * k;
+        if sr >= style.ring_px {
+            frame.ringed[b] = 1;
+        }
+        let s = &mut frame.paths[b];
+        if k > 0. && sr < style.lod_px {
+            if !seen.insert((b, (cx * k).round() as i64, (cy * k).round() as i64)) {
+                continue;
+            }
+            // A square of the node's size, at least a point across.
+            let h = rr.max(0.5 / k);
+            let (x0, y0, side, back) = (fixed(cx - h, d, &mut b0), fixed(cy - h, d, &mut b1), fixed(2. * h, d, &mut b2), fixed(-2. * h, d, &mut b3));
+            for part in ["M", x0, " ", y0, "h", side, "v", side, "h", back, "Z"] {
+                s.push_str(part);
+            }
+            continue;
+        }
+        let (x0, x1) = (fixed(cx + rr, d, &mut b0), fixed(cx - rr, d, &mut b1));
+        let (yy, rs) = (fixed(cy, d, &mut b2), fixed(rr, d, &mut b3));
+        for (c, x) in [('M', x0), ('A', x1), ('A', x0)] {
+            s.push(c);
+            if c == 'A' {
+                s.push_str(rs);
+                s.push(' ');
+                s.push_str(rs);
+                s.push_str(" 0 1 0 ");
+            }
+            s.push_str(x);
+            s.push(' ');
+            s.push_str(yy);
+        }
+        s.push('Z');
+    }
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FAR: Rect = Rect { x0: -1e9, y0: -1e9, x1: 1e9, y1: 1e9 };
+
+    fn frame_style(scale: f64) -> FrameStyle {
+        FrameStyle { view: FAR, decimals: 2, scale, ring_px: 5., lod_px: 2. }
+    }
+
+    #[test]
+    fn frame_nodes_batches_by_rank_and_focus_and_rings_big_batches() {
+        let (x, y, r) = (vec![0., 100., 200.], vec![0., 0., 0.], vec![10., 10., 3.]);
+        let f = frame_nodes(&[0, 1, 1], None, 2, &x, &y, &r, &frame_style(1.));
+        assert_eq!(f.in_view, vec![1, 1, 1]);
+        // Undimmed batches are colors + rank.
+        assert!(f.paths[0].is_empty() && f.paths[1].is_empty());
+        assert_eq!(f.paths[2].matches('M').count(), 1);
+        assert_eq!(f.paths[3].matches('M').count(), 2);
+        assert_eq!(f.ringed, vec![0, 0, 1, 1]);
+        // With a focus, the others are dimmed.
+        let focus = [true, false, false];
+        let f = frame_nodes(&[0, 1, 1], Some(&focus), 2, &x, &y, &r, &frame_style(1.));
+        assert_eq!(f.paths[2].matches('M').count(), 1);
+        assert_eq!(f.paths[1].matches('M').count(), 2);
+        // Off view: left out, and said so.
+        let view = Rect { x0: 50., y0: -10., x1: 150., y1: 10. };
+        let f = frame_nodes(&[0, 1, 1], None, 2, &x, &y, &r, &FrameStyle { view, ..frame_style(1.) });
+        assert_eq!(f.in_view, vec![0, 1, 0]);
+        // A rank out of range (no such color) is left out but still in view.
+        let f = frame_nodes(&[0, 9, 1], None, 2, &x, &y, &r, &frame_style(1.));
+        assert_eq!(f.in_view, vec![1, 1, 1]);
+        assert_eq!(f.paths.iter().map(|p| p.matches('M').count()).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn tiny_nodes_are_squares_once_per_pixel() {
+        // Zoomed out to 0.1: radius 10 is a point on screen. Nodes 0 and 1 share a pixel, node 2 does not.
+        let (x, y, r) = (vec![0., 2., 40.], vec![0., 1., 0.], vec![10., 10., 10.]);
+        let f = frame_nodes(&[0, 0, 0], None, 1, &x, &y, &r, &frame_style(0.1));
+        let p = &f.paths[1];
+        assert_eq!(p.matches('M').count(), 2, "{p}");
+        assert!(!p.contains('A'), "squares, not arcs: {p}");
+        assert_eq!(&p[..p.find('Z').unwrap() + 1], "M-10 -10h20v20h-20Z");
+        // Big enough on screen: circles, one each.
+        let f = frame_nodes(&[0, 0, 0], None, 1, &x, &y, &r, &frame_style(1.));
+        assert_eq!(f.paths[1].matches('M').count(), 3);
+        assert!(f.paths[1].contains('A'));
+        // Dimmed and undimmed nodes in one pixel are both kept: they are in different batches.
+        let focus = [true, false, false];
+        let f = frame_nodes(&[0, 0, 0], Some(&focus), 1, &x, &y, &r, &frame_style(0.1));
+        assert_eq!(f.paths[0].matches('M').count() + f.paths[1].matches('M').count(), 3);
+    }
+
+    #[test]
+    fn level_of_detail_drops_hidden_tiny_and_repeated_edges() {
+        let edge = |s: u32, t: u32| Edge { source: s, target: t, ..Default::default() };
+        // 0–1 overlap (hidden under the nodes); 2–3 and 4–5 run along the same pixels at zoom 0.1; 6–7 far apart.
+        let x = vec![0., 15., 100., 300., 102., 301., 0., 0.];
+        let y = vec![0., 0., 100., 100., 101., 101., 500., 900.];
+        let r = vec![10.; 8];
+        let edges = [edge(0, 1), edge(2, 3), edge(4, 5), edge(6, 7)];
+        let style = |scale| EdgeStyle { view: FAR, arrows: false, arrow_len: 0., decimals: 2, scale };
+        let count = |b: &EdgeBatch| b.lines.matches('M').count();
+        assert_eq!(count(&trace_edges(&edges, &[1; 4], &x, &y, &r, &style(0.))[1]), 4, "off: everything");
+        assert_eq!(count(&trace_edges(&edges, &[1; 4], &x, &y, &r, &style(0.1))[1]), 2, "hidden and repeated dropped");
+        assert_eq!(count(&trace_edges(&edges, &[1; 4], &x, &y, &r, &style(1.))[1]), 3, "zoomed in: only the hidden one");
+        // Different states are never merged.
+        assert_eq!(trace_edges(&edges, &[1, 1, 2, 1], &x, &y, &r, &style(0.1)).iter().map(count).sum::<usize>(), 3);
+        // Reversed edges merge without arrows, not with them.
+        let rev = [edge(2, 3), edge(3, 2)];
+        assert_eq!(count(&trace_edges(&rev, &[1; 2], &x, &y, &r, &style(0.1))[1]), 1);
+        let arrows = EdgeStyle { arrows: true, arrow_len: 7., ..style(0.1) };
+        assert_eq!(count(&trace_edges(&rev, &[1; 2], &x, &y, &r, &arrows)[1]), 2);
+    }
 
     const VIEW: Rect = Rect { x0: -1e9, y0: -1e9, x1: 1e9, y1: 1e9 };
 
@@ -286,7 +477,7 @@ mod tests {
             &[0., 100.],
             &[0., 0.],
             &[10., 20.],
-            &EdgeStyle { view: VIEW, arrows: true, arrow_len: 10., decimals: 2 },
+            &EdgeStyle { view: VIEW, arrows: true, arrow_len: 10., decimals: 2, scale: 0. },
         );
         // From x = 10 (the source's edge) to 80 (the target's) less 7 under the arrow.
         assert_eq!(normal.lines, "M10 0L73 0");
@@ -307,7 +498,7 @@ mod tests {
             &[0., 100.],
             &[0., 0.],
             &[10., 10.],
-            &EdgeStyle { view: VIEW, arrows: false, arrow_len: 0., decimals: 2 },
+            &EdgeStyle { view: VIEW, arrows: false, arrow_len: 0., decimals: 2, scale: 0. },
         );
         assert!(out[0].lines.starts_with('M') && !out[0].lines.contains('Q'));
         assert!(out[2].lines.contains('Q'));
@@ -323,7 +514,7 @@ mod tests {
         let x = [10., 40., 500., 600.];
         let y = [10., 40., 500., 600.];
         let r = [5.; 4];
-        let out = trace_edges(&edges, &[1, 1], &x, &y, &r, &EdgeStyle { view, arrows: false, arrow_len: 0., decimals: 2 });
+        let out = trace_edges(&edges, &[1, 1], &x, &y, &r, &EdgeStyle { view, arrows: false, arrow_len: 0., decimals: 2, scale: 0. });
         assert_eq!(out[1].lines.matches('M').count(), 1);
         let nodes = trace_nodes(&[0, 1, 0, u32::MAX], 2, &x, &y, &r, &view, 2);
         assert_eq!(nodes[0], "M15 10A5 5 0 1 0 5 10A5 5 0 1 0 15 10Z");
@@ -360,7 +551,7 @@ mod tests {
     fn zoomed_out_paths_are_shorter_and_the_same_shape() {
         let edges = [Edge { source: 0, target: 1, ..Edge::default() }];
         let (x, y, r) = ([0.123, 100.456], [0.789, 50.321], [10.5, 12.25]);
-        let at = |decimals| trace_edges(&edges, &[1], &x, &y, &r, &EdgeStyle { view: VIEW, arrows: true, arrow_len: 7., decimals });
+        let at = |decimals| trace_edges(&edges, &[1], &x, &y, &r, &EdgeStyle { view: VIEW, arrows: true, arrow_len: 7., decimals, scale: 0. });
         let (fine, coarse) = (at(2), at(0));
         assert!(coarse[1].lines.len() < fine[1].lines.len());
         assert_eq!(coarse[1].lines.matches(' ').count(), fine[1].lines.matches(' ').count());
