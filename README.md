@@ -317,7 +317,7 @@ cargo test                      # the Rust crate on its own
 package the way an app does (`"dependencies": { "nsh-graph": { "path": ".." } }`), so it also builds the crate.
 
 To release: bump `version` in `Cargo.toml`, then `cargo publish` and tag the same version
-(`git tag v0.1.1 && git push --tags`), which is what `nsh add github:JetSquirrel/nsh-graph` installs. Apps update
+(`git tag v0.2.0 && git push --tags`), which is what `nsh add github:JetSquirrel/nsh-graph` installs. Apps update
 with `nsh upgrade nsh-graph`.
 
 ## Roadmap
