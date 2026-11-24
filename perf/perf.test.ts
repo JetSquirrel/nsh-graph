@@ -168,6 +168,137 @@ describe("drawing", () => {
   }, 180_000);
 });
 
+
+/**
+ * The backend as it was before the layout kept its state: the same Rust, without `run`, so the
+ * simulation copies every node's state both ways each tick. What the kept path is checked against.
+ */
+const legacy = {
+  ForceLayout: function () {
+    const l = new backend.ForceLayout();
+    return { setConfig: (v: number[]) => l.setConfig(v), setGraph: (n: number, a: Uint8Array, b: Uint8Array) => l.setGraph(n, a, b), tick: (s: Uint8Array, i: number, a: number, t: number) => l.tick(s, i, a, t) };
+  } as unknown as NativeBackend["ForceLayout"],
+  GraphPainter: backend.GraphPainter,
+} as NativeBackend;
+
+function engineWith(native: NativeBackend, data: GraphData) {
+  setNativeBackend(native);
+  // Animated (not reduced motion), so each `step` is exactly one tick in both.
+  const engine = new GraphEngine({ layout: "force", reduceMotion: false });
+  setNativeBackend(null);
+  engine.setSize(1000, 700);
+  engine.setData(data);
+  return engine;
+}
+
+describe("the Rust layout keeping its state", () => {
+  test("gives what copying the state every tick gives, through drags, pins, sizing, layouts, data and groups", async () => {
+    const data = datasets.find((d) => d.id === "miserables")!.data();
+    const kept = engineWith(backend, data);
+    const old = engineWith(legacy, data);
+    expect(typeof (kept.sim as unknown as { kept: boolean }).kept).toBe("boolean");
+    expect((kept.sim as unknown as { kept: boolean }).kept).toBe(true);
+    expect((old.sim as unknown as { kept: boolean }).kept).toBe(false);
+    let time = 0;
+    const both = (f: (e: GraphEngine) => void) => {
+      f(kept);
+      f(old);
+    };
+    const frames = (n: number) => {
+      for (let i = 0; i < n; i++) {
+        time += 16;
+        both((e) => e.step(time));
+      }
+    };
+    const view = [-1e6, -1e6, 1e6, 1e6];
+    const check = (phase: string) => {
+      kept.nodes.forEach((n, i) => {
+        const m = old.nodes[i];
+        if (n.x !== m.x || n.y !== m.y || n.fx !== m.fx || n.fy !== m.fy) {
+          throw new Error(`${phase}: node ${n.id} at ${n.x},${n.y} (pin ${n.fx},${n.fy}), not ${m.x},${m.y} (pin ${m.fx},${m.fy})`);
+        }
+      });
+      expect(kept.sim.alpha).toBe(old.sim.alpha);
+      // The painter draws the same circles, though the kept one got its positions straight from the tick.
+      const keys = new Uint8Array(new Uint32Array(kept.nodes.length).buffer);
+      both((e) => e.paintPositions(e.painter!));
+      expect(kept.painter!.traceNodes(keys, 1, view)).toEqual(old.painter!.traceNodes(keys, 1, view));
+    };
+    frames(20);
+    check("settling");
+    expect(kept.sim.positions).not.toBeNull(); // the fast path was taken
+
+    // Drag one of two selected nodes: both move, pinned while dragged.
+    both((e) => e.selectNodes([e.nodes[3].id, e.nodes[7].id]));
+    both((e) => e.dragStart(3));
+    for (let i = 0; i < 5; i++) {
+      both((e) => e.dragMove(400 + i * 12, 300 - i * 7));
+      frames(1);
+    }
+    check("dragging");
+    both((e) => e.dragEnd());
+    frames(10);
+    check("after the drag");
+
+    both((e) => e.setPinned(e.nodes[11].id, true));
+    frames(5);
+    both((e) => e.setPinned(e.nodes[11].id, false));
+    frames(5);
+    both((e) => e.unpinAll());
+    frames(5);
+    check("pins");
+
+    both((e) => e.setOptions({ nodeSizing: { kind: "fixed", radius: 12 } }));
+    frames(10);
+    check("sizing");
+
+    both((e) => e.setOptions({ layout: "circular" }));
+    frames(10); // part of the tween
+    both((e) => e.setOptions({ layout: "force" }));
+    frames(15);
+    check("layouts");
+
+    const more = { nodes: [...data.nodes, { id: "new-1", group: "1" }, { id: "new-2" }], edges: [...data.edges, { from: "new-1", to: data.nodes[0].id }, { from: "new-2", to: "new-1" }] };
+    both((e) => e.setData(more));
+    frames(10);
+    check("data");
+
+    const group = kept.groups()[1].id;
+    both((e) => e.setGroupsCollapsed([group], true));
+    frames(10);
+    both((e) => e.setGroupsCollapsed([group], false));
+    frames(10);
+    check("groups");
+  }, 120_000);
+
+  test("cost, 5000 nodes: copying every tick against keeping the state", async () => {
+    const data = scaleFree(5000, 2);
+    const kept = engineWith(backend, data);
+    await yieldTurn();
+    const old = engineWith(legacy, data);
+    await yieldTurn();
+    // Alternate, so both see the same machine (other processes, the scanner), and keep the best of 5 rounds.
+    const frame = (e: GraphEngine) => () => {
+      e.sim.tick();
+      e.geometryVersion++;
+      e.paintPositions(e.painter!);
+    };
+    let bestOld = Infinity, bestKept = Infinity, tickOld = Infinity, tickKept = Infinity;
+    for (let round = 0; round < 5; round++) {
+      tickOld = Math.min(tickOld, await timed(4, () => old.sim.tick()));
+      tickKept = Math.min(tickKept, await timed(4, () => kept.sim.tick()));
+      bestOld = Math.min(bestOld, await timed(4, frame(old)));
+      bestKept = Math.min(bestKept, await timed(4, frame(kept)));
+    }
+    rows.push(
+      `kept state, 5000     tick ${tickOld.toFixed(1).padStart(5)} → ${tickKept.toFixed(1).padStart(5)} ms` +
+        `   tick + painter positions ${bestOld.toFixed(1).padStart(5)} → ${bestKept.toFixed(1).padStart(5)} ms`,
+    );
+    expect(tickKept).toBeLessThan(tickOld);
+    expect(bestKept).toBeLessThan(bestOld);
+  }, 180_000);
+});
+
 describe("TypeScript and Rust layouts", () => {
   for (const id of ids) {
     test(id, async () => {

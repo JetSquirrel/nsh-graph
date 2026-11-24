@@ -377,7 +377,7 @@
   <section id="performance">
     <div class="wrap">
       <h2>Fast where it counts: on QuickJS</h2>
-      <p class="sub">NSH runs TSX on QuickJS everywhere except the web. nsh-graph's typed-array quadtree allocates nothing per tick, and its loops are written for an interpreter, so with the same forces it matches d3-force's layout quality at 3.8–8.3× the speed, and it lays out 3–12× faster than AntV G6's layouts. For large graphs, the opt-in Rust backend ticks and draws natively: 5,000 nodes settle in about 4 s instead of minutes.</p>
+      <p class="sub">NSH runs TSX on QuickJS everywhere except the web. nsh-graph's typed-array quadtree allocates nothing per tick, and its loops are written for an interpreter, so with the same forces it matches d3-force's layout quality at 3.8–8.3× the speed, and it lays out 3–12× faster than AntV G6's layouts. For large graphs, the opt-in Rust backend ticks and draws natively: 5,000 nodes settle in about 2.5 s instead of minutes.</p>
       <div class="bench">
         <div class="card">
           <h3 style="margin-top:0">Time to a finished layout</h3>
