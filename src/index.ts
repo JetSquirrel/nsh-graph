@@ -1,5 +1,7 @@
 export { GraphView, type GraphViewProps } from "./GraphView";
 export { GraphLegend, type GraphLegendProps } from "./GraphLegend";
+export { GraphTooltip, type GraphTooltipProps } from "./GraphTooltip";
+export { tooltipInfo, type TooltipInfo, type TooltipTarget } from "./tooltip";
 export { GraphController, createGraphController, type LegendEntry, type ToImageOptions } from "./controller";
 export { GraphEngine, mergeGraphData, DEFAULT_OPTIONS, type EngineOptions, type EngineEvent } from "./engine";
 export { ForceSimulation, DEFAULT_FORCE } from "./simulation";

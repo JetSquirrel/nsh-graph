@@ -16,6 +16,8 @@ import {
   signal,
   token,
   untracked,
+  View,
+  type JSX,
   type ContextMenuEvent,
   type GestureResponderEvent,
   type KeyEvent,
@@ -29,6 +31,8 @@ import type { GraphController } from "./controller";
 import { GraphEngine } from "./engine";
 import { OTHER, PALETTE_DARK, PALETTE_LIGHT, withAlpha } from "./palette";
 import { renderGraph, type RenderTheme } from "./render";
+import { GraphTooltip } from "./GraphTooltip";
+import { tooltipInfo, type TooltipTarget } from "./tooltip";
 import type {
   ColorBy,
   ForceConfig,
@@ -98,6 +102,16 @@ export interface GraphViewProps<N = unknown, E = unknown> {
   onGroupToggle?: (group: GraphGroup<N>, collapsed: boolean) => void;
   /** The pointer moved onto a node or edge, or off it (null). Desktops and the web. */
   onHover?: (target: HitTarget<N, E> | null) => void;
+  /**
+   * A card beside the pointer over a node, edge, group or bundle: what it is, its caption, and how many
+   * relationships or members it has. Desktops and the web (there is no hover on touch). Default true.
+   */
+  tooltips?: boolean;
+  /**
+   * The tooltip's content in place of the built-in card; null shows none for that target. Return a
+   * `<GraphTooltip>` to keep the card's look with lines of your own.
+   */
+  tooltip?: (target: TooltipTarget<N, E>) => JSX.Element | null;
   /** A context menu was asked for over a node, an edge or the background. Open one with `Menu.popup(items, e.pagePosition)`. */
   onContextMenu?: (target: HitTarget<N, E>, e: { position: Point; pagePosition: Point }) => void;
 
@@ -117,6 +131,11 @@ const TAP_SLOP = 5;
 const PATHS = { path: (d: string) => new Path2D(d) };
 const HIT_SLOP_TOUCH = 8;
 const DOUBLE_TAP_MS = 350;
+/** The tooltip's distance from the pointer, in points. */
+const TIP_OFFSET = 14;
+
+/** Where the tooltip sits in the view: beside the pointer, on the side with room. */
+type TipPlace = { left?: number; right?: number; top?: number; bottom?: number };
 
 type Gesture = {
   mode: "pending-pan" | "pending-drag" | "pending-box" | "pan" | "drag" | "box" | "pinch";
@@ -147,6 +166,10 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
   const dataVersion = signal(0);
   const selection = signal<Selection>(null);
   const multi = () => props.multiSelect ?? true;
+  // The tooltip: what the pointer is over (set as the hover changes), and where it goes (as the pointer
+  // moves; null hides it: the pointer left, pressed, or the graph moved under it).
+  const tipTarget = signal<TooltipTarget | null>(null);
+  const tipPlace = signal<TipPlace | null>(null);
 
   const theme = computed<RenderTheme>(() => {
     const c = props.colors ?? {};
@@ -201,9 +224,13 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
       props.controller?._report({ selection: e.selection });
       props.onSelectionChange?.(e.selection as Selection<N, E>);
     } else if (e.type === "group") {
-      untracked(() => dataVersion.update((n) => n + 1));
+      untracked(() => {
+        dataVersion.update((n) => n + 1);
+        tipTarget.set(null); // what was hovered may be gone
+      });
       props.onGroupToggle?.(e.group as GraphGroup<N>, e.collapsed);
     } else {
+      untracked(() => tipTarget.set(e.target === null || e.target.kind === "background" ? null : e.target));
       props.onHover?.(e.target as HitTarget<N, E> | null);
     }
   };
@@ -236,6 +263,7 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
     const data = props.data;
     untracked(() => {
       engine.setData(data as GraphData);
+      tipTarget.set(null); // a data change lets go of the hover
       dataVersion.update((n) => n + 1);
       invalidate();
     });
@@ -304,6 +332,7 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
       pinchCenter: p,
     };
     if (e.touches.length >= 2) startPinch(gesture, e);
+    tipPlace.set(null); // a press hides the tooltip until the pointer moves again
     return true; // keep scroll views around from taking the drag
   };
 
@@ -419,25 +448,46 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
     } else {
       engine.panBy(-e.delta.x, -e.delta.y);
     }
+    // The graph moved under the pointer: hover (and the tooltip) follow what is under it now.
+    if (!gesture) hoverAt(e.position);
     invalidate();
   };
 
   const onPinch = (e: PinchEvent) => {
     engine.holdLayout();
     engine.zoomAt(1 + e.delta, e.position.x, e.position.y);
+    if (!gesture) hoverAt(e.position);
     invalidate();
+  };
+
+  /**
+   * Hovers what is under the pointer at p (view coordinates), and puts the tooltip beside it. Returns
+   * whether the hover changed (only then does the canvas need drawing again).
+   */
+  const hoverAt = (p: Point): boolean => {
+    const changed = engine.hoverAt(p.x, p.y);
+    const w = engine.width;
+    const h = engine.height;
+    // On the side with more room, so the tooltip is not cut off at the right and bottom edges.
+    tipPlace.set({
+      ...(p.x > w * 0.6 ? { right: w - p.x + TIP_OFFSET } : { left: p.x + TIP_OFFSET }),
+      ...(p.y > h * 0.7 ? { bottom: h - p.y + TIP_OFFSET } : { top: p.y + TIP_OFFSET }),
+    });
+    return changed;
   };
 
   const onMouseMove = (e: MouseEvent) => {
     if (gesture || e.pressedButton !== null) return;
-    if (engine.hoverAt(e.position.x, e.position.y)) invalidate();
+    if (hoverAt(e.position)) invalidate();
   };
 
   const onMouseLeave = () => {
+    tipPlace.set(null);
     if (engine.hoverAt(null)) invalidate();
   };
 
   const onContextMenu = (e: ContextMenuEvent) => {
+    tipPlace.set(null); // the menu takes over
     const target = engine.hitTest(e.position.x, e.position.y, 2);
     // A menu over one of several selected nodes acts on them all, so keep them selected.
     if (target.kind === "node" && engine.isSelected(target.node.id)) {
@@ -544,37 +594,65 @@ export function GraphView<N = unknown, E = unknown>(props: GraphViewProps<N, E>)
     return `${base}: ${engine.nodeCount} nodes, ${engine.edgeCount} edges${groups}${what}`;
   };
 
+  // ---- Tooltip
+
+  /** What the tooltip shows: the hovered target while the pointer is still over the graph and not pressing. */
+  const tip = () => ((props.tooltips ?? true) && tipPlace() !== null ? tipTarget() : null);
+  const tipContent = (target: TooltipTarget) => {
+    if (props.tooltip) return props.tooltip(target as TooltipTarget<N, E>);
+    const t = theme();
+    return <GraphTooltip {...tooltipInfo(engine, target, t.palette, t.other)} />;
+  };
+
   return (
-    <Canvas
-      style={{ flex: 1, ...props.style }}
-      class={props.class}
-      testID={props.testID}
-      role="image"
-      accessibilityLabel={label()}
-      accessibilityHint="Arrow keys move between nodes, Shift adds them to the selection, Enter opens one, plus and minus zoom, 0 fits"
-      focusable
-      captureKeys={KEYS}
-      onKeyDown={onKeyDown}
-      onStartShouldSetResponder={() => true}
-      onMoveShouldSetResponder={() => true}
-      onResponderTerminationRequest={() => false}
-      onResponderGrant={onGrant}
-      onResponderMove={onMove}
-      onResponderRelease={onRelease}
-      onResponderTerminate={onTerminate}
-      onWheel={onWheel}
-      onPinch={onPinch}
-      onMouseMove={onMouseMove}
-      onMouseLeave={onMouseLeave}
-      onContextMenu={onContextMenu}
-      draw={(cx, size) => {
-        frame();
-        const t = theme();
-        engine.setSize(size.width, size.height);
-        renderGraph(cx, engine, t, size.width, size.height, PATHS);
-        // The first draw may have fitted the view: let the loop pick up from here.
-        untracked(wake);
-      }}
-    />
+    <View style={{ flex: 1, ...props.style }} class={props.class}>
+      {canvas()}
+      <If when={tip()}>
+        {(target) => (
+          <View
+            style={{ position: "absolute", pointerEvents: "none", ...tipPlace() }}
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          >
+            {tipContent(target())}
+          </View>
+        )}
+      </If>
+    </View>
   );
+
+  function canvas() {
+    return (
+      <Canvas
+        style={{ flex: 1 }}
+        testID={props.testID}
+        role="image"
+        accessibilityLabel={label()}
+        accessibilityHint="Arrow keys move between nodes, Shift adds them to the selection, Enter opens one, plus and minus zoom, 0 fits"
+        focusable
+        captureKeys={KEYS}
+        onKeyDown={onKeyDown}
+        onStartShouldSetResponder={() => true}
+        onMoveShouldSetResponder={() => true}
+        onResponderTerminationRequest={() => false}
+        onResponderGrant={onGrant}
+        onResponderMove={onMove}
+        onResponderRelease={onRelease}
+        onResponderTerminate={onTerminate}
+        onWheel={onWheel}
+        onPinch={onPinch}
+        onMouseMove={onMouseMove}
+        onMouseLeave={onMouseLeave}
+        onContextMenu={onContextMenu}
+        draw={(cx, size) => {
+          frame();
+          const t = theme();
+          engine.setSize(size.width, size.height);
+          renderGraph(cx, engine, t, size.width, size.height, PATHS);
+          // The first draw may have fitted the view: let the loop pick up from here.
+          untracked(wake);
+        }}
+      />
+    );
+  }
 }

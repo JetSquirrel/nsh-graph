@@ -103,3 +103,34 @@ test("a collapsed group is one super node: a tap selects it, a double-tap expand
   // The expanded group's selection is let go.
   expect(app.shows("text:selected: none")).toBe(true);
 });
+
+test("hovering a node shows a tooltip beside the pointer; leaving, pressing or tooltips={false} hides it", async () => {
+  const app = await open("./fixtures/Tooltip.tsx", { platform: "windows" }); // a desktop: phones have no hover
+  await app.waitFor("id:graph");
+  await app.wait(300);
+  await app.hover("id:graph"); // the middle, where the node is
+  await app.waitFor("text:Alice");
+  expect(app.shows("text:Person · team")).toBe(true);
+  expect(app.shows("text:0 relationships")).toBe(true);
+  // The pointer leaves the graph: no tooltip.
+  await app.hover("id:hovered");
+  await app.waitUntil(() => !app.shows("id:graph-tooltip"));
+  // A press hides it until the pointer moves again.
+  await app.hover("id:graph");
+  await app.waitFor("id:graph-tooltip");
+  await app.drag("id:graph", {});
+  await app.waitUntil(() => !app.shows("id:graph-tooltip"));
+
+  // A custom tooltip in place of the built-in card.
+  await app.press("id:custom");
+  await app.hover("id:graph");
+  await app.waitFor("text:Custom Alice");
+  expect(app.shows("text:Person · team")).toBe(false);
+
+  // Turned off: the hover is still reported, with no tooltip.
+  await app.press("id:off");
+  await app.hover("id:graph");
+  await app.waitFor("text:hovered: a");
+  await app.wait(100);
+  expect(app.shows("id:graph-tooltip")).toBe(false);
+});
