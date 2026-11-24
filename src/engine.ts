@@ -211,6 +211,9 @@ export class GraphEngine {
   private paintedVersion = -1;
   private paintedNodes: EngineNode[] | null = null;
   private paintBuffer = new Float64Array(0);
+  /** Bumped when radii change; the painter's radii are as of `paintedRadii`. */
+  private radiiVersion = 0;
+  private paintedRadii = -1;
 
   constructor(options: Partial<EngineOptions> = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -621,6 +624,7 @@ export class GraphEngine {
           : sizing.min + (sizing.max - sizing.min) * Math.sqrt(n.degree / maxDeg));
       if (!(n.r > 0)) n.r = 1;
     }
+    this.radiiVersion++;
   }
 
   private placeNewNodes() {
@@ -668,6 +672,7 @@ export class GraphEngine {
     if (options.force) this.sim.setConfig(options.force);
     if (options.nodeSizing && JSON.stringify(options.nodeSizing) !== JSON.stringify(prev.nodeSizing)) {
       this.updateRadii();
+      this.sim.changedAll();
       if (o.layout === "force") this.sim.reheat(0.3);
     }
     if (options.colorBy && options.colorBy !== prev.colorBy) this.prepareColors(true);
@@ -731,7 +736,9 @@ export class GraphEngine {
     // overrun the budget and hold the first frame (a 5000-node tick takes 150 ms or more).
     if (!this.sim.isNative && this.nodes.length * 0.03 > WARM_UP_MS) return;
     const start = now();
-    while (this.sim.alpha > 0.35 && now() - start < WARM_UP_MS) this.sim.tick();
+    // Positions are only looked at once the warm-up is over.
+    while (this.sim.alpha > 0.35 && now() - start < WARM_UP_MS) this.sim.tick(1, false);
+    this.sim.sync();
     this.geometryVersion++;
   }
 
@@ -741,6 +748,7 @@ export class GraphEngine {
       n.y = p[i].y;
       n.vx = n.vy = 0;
     });
+    this.sim.changedAll(true);
     this.geometryVersion++;
   }
 
@@ -763,6 +771,7 @@ export class GraphEngine {
         n.x = t.from[i].x + (t.to[i].x - t.from[i].x) * e;
         n.y = t.from[i].y + (t.to[i].y - t.from[i].y) * e;
       });
+      this.sim.changedAll();
       this.geometryVersion++;
       this.dirty = true;
       if (u >= 1) this.tween = null;
@@ -778,9 +787,10 @@ export class GraphEngine {
       const start = now();
       let ticks = 0;
       do {
-        this.sim.tick();
+        this.sim.tick(1, false);
         ticks++;
       } while (this.sim.running && now() - start < 10);
+      this.sim.sync();
       this.lastTickMs = (now() - start) / ticks;
       this.geometryVersion++;
       if (!this.sim.running || time - this.lastQuietDraw >= 500) {
@@ -1337,6 +1347,7 @@ export class GraphEngine {
         m.fy = m.y;
       }
     }
+    this.draggedChanged();
     if (this.options.layout === "force") {
       this.sim.alphaTarget = 0.3;
       this.sim.reheat(0.3);
@@ -1357,24 +1368,32 @@ export class GraphEngine {
       m.fx = m.x = p.x + g.dx;
       m.fy = m.y = p.y + g.dy;
     }
+    this.draggedChanged();
     this.geometryVersion++;
     this.dirty = true;
   }
 
+  /** Tells the layout the dragged node (and those moving with it) changed. */
+  private draggedChanged() {
+    if (this.dragging >= 0) this.sim.changed(this.dragging);
+    for (const g of this.dragGroup) this.sim.changed(g.index);
+  }
+
   dragEnd() {
     const n = this.nodes[this.dragging];
-    this.dragging = -1;
-    this.sim.alphaTarget = 0;
     const group = this.dragGroup;
-    this.dragGroup = [];
-    if (!n) return;
-    if (!this.options.stickyDrag) {
+    if (n && !this.options.stickyDrag) {
       if (!this.dragWasPinned) n.fx = n.fy = null;
       for (const g of group) {
         const m = this.nodes[g.index];
         if (m && !g.wasPinned) m.fx = m.fy = null;
       }
     }
+    if (n) this.draggedChanged();
+    this.dragging = -1;
+    this.sim.alphaTarget = 0;
+    this.dragGroup = [];
+    if (!n) return;
     this.dirty = true;
   }
 
@@ -1394,12 +1413,15 @@ export class GraphEngine {
       n.fx = n.fy = null;
       if (this.options.layout === "force") this.sim.reheat(0.3);
     }
+    // A hidden member of a collapsed group is not in the layout; its pin goes over when it is drawn again.
+    if (this.nodes[n.index] === n) this.sim.changed(n.index);
     this.dirty = true;
   }
 
   unpinAll() {
     for (const n of this.modelNodes) n.fx = n.fy = null;
     for (const n of this.nodes) n.fx = n.fy = null;
+    this.sim.changedAll();
     if (this.options.layout === "force") this.sim.reheat(0.3);
     this.dirty = true;
   }
@@ -1477,6 +1499,14 @@ export class GraphEngine {
   /** Hands the nodes' positions and radii to the painter, unless it has them already. */
   paintPositions(painter: NativeGraphPainter) {
     if (this.paintedVersion === this.geometryVersion && this.paintedNodes === this.nodes) return;
+    // Straight after a Rust tick, with nothing moved in JS since: the tick's own buffer is the positions,
+    // and the painter has the radii already.
+    const fresh = this.sim.positions;
+    if (fresh && painter.setPositions && this.paintedNodes === this.nodes && this.paintedRadii === this.radiiVersion) {
+      painter.setPositions(fresh);
+      this.paintedVersion = this.geometryVersion;
+      return;
+    }
     const nodes = this.nodes;
     const n = nodes.length;
     if (this.paintBuffer.length !== n * 3) this.paintBuffer = new Float64Array(n * 3);
@@ -1490,6 +1520,7 @@ export class GraphEngine {
     painter.setNodes(new Uint8Array(pos.buffer));
     this.paintedVersion = this.geometryVersion;
     this.paintedNodes = nodes;
+    this.paintedRadii = this.radiiVersion;
   }
 
   /** The color of a category (or group): its palette slot; nodes without one, and those past the palette's end, share `other`. */

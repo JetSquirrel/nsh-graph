@@ -106,8 +106,8 @@ What it shows:
   would be a reasonable addition to nsh-graph.
 - **No JS engine lays out 1500 nodes interactively in QuickJS.** nsh-graph is the fastest at 12 s, d3-force and
   ForceAtlas2 take 66–96 s, and the AntV layouts don't finish in 120 s. For graphs that size, use nsh-graph's
-  Rust backend (`nsh-graph/native`, measured with `nsh test perf`: the same 1500 nodes settle in 0.9 s, 5000 in
-  3.6 s), static layouts or precomputed positions.
+  Rust backend (`nsh-graph/native`, measured with `nsh test perf`: the same 1500 nodes settle in 0.56 s, 5000 in
+  2.5 s), static layouts or precomputed positions.
 
 Engines that can't run in NSH at all: **Cytoscape.js** fails to load, because it assigns to a frozen built-in
 prototype. **ngraph.forcelayout** (behind VivaGraph and ngraph) generates its physics code with `new Function`,

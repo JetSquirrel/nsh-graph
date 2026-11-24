@@ -75,12 +75,30 @@ export class ForceSimulation {
   /** The Rust layout the ticks run on, when `setNativeBackend` registered one; null runs them here. */
   private native: NativeForceLayout | null = null;
   private state = new Float64Array(0);
+  /**
+   * Whether the Rust layout keeps the nodes' state between ticks (a backend with `run`): JS then sends
+   * only what it changed (`changed`, `changedAll`) and reads back positions, instead of copying every
+   * node's state both ways each tick.
+   */
+  private kept = false;
+  /** What JS changed since the last tick: every node (1; 2: their velocities start over too), and some. */
+  private pendingAll: 0 | 1 | 2 = 0;
+  private pending = new Set<number>();
+  /** The last `run`'s result, and whether the nodes have not been given its positions yet (`sync`). */
+  private lastRun: Uint8Array | null = null;
+  private unsynced = false;
+  /**
+   * The last tick's result while no node changed in JS since: x, y per node, as the Rust painter's
+   * `setPositions` takes them, so a frame does not pack the positions again. Null otherwise.
+   */
+  positions: Uint8Array | null = null;
 
   /** `native` overrides the backend `setNativeBackend` registered (null: TypeScript). */
   constructor(config: Partial<ForceConfig> = {}, native: NativeBackend | null = nativeBackend()) {
     this.config = { ...DEFAULT_FORCE, ...config };
     if (native) {
       this.native = new native.ForceLayout();
+      this.kept = typeof this.native.run === "function" && typeof this.native.load === "function";
       this.pushConfig();
     }
   }
@@ -100,9 +118,13 @@ export class ForceSimulation {
 
   /** Replaces the nodes and links. Node objects are used as given, so their positions carry over. */
   setGraph(nodes: SimNode[], links: SimLink[]) {
+    // The velocities live in Rust between ticks: bring them back to the nodes first, so the ones that stay
+    // keep moving as they were (as they do in TypeScript).
+    if (this.kept) this.pullVelocities();
     this.nodes = nodes;
     this.links = links;
     if (this.native) this.pushGraph();
+    if (this.kept) this.loadState();
     const count = new Array<number>(nodes.length).fill(0);
     for (const l of links) {
       count[l.source]++;
@@ -143,6 +165,143 @@ export class ForceSimulation {
       groups[i] = g;
     });
     this.native!.setGraph(nodes.length, new Uint8Array(links.buffer), new Uint8Array(groups.buffer));
+  }
+
+  /**
+   * Node i's position, pin or radius was changed in JS since the last tick (a drag, a pin): with the Rust
+   * layout keeping the state, it goes over before the next tick. Nothing to do in TypeScript.
+   */
+  changed(i: number) {
+    if (!this.kept) return;
+    this.sync();
+    this.pending.add(i);
+    this.positions = null;
+  }
+
+  /**
+   * Every node may have changed in JS since the last tick (a layout jumped or tweened them, their radii
+   * changed). With `resetVelocity` their velocities start over at 0, as when the engine zeroes `vx`/`vy`.
+   */
+  changedAll(resetVelocity = false) {
+    if (!this.kept) return;
+    this.sync();
+    this.pendingAll = resetVelocity ? 2 : Math.max(this.pendingAll, 1) as 1 | 2;
+    this.positions = null;
+  }
+
+  /** Gives the nodes the positions of ticks run with `sync` false. */
+  sync() {
+    if (!this.unsynced || !this.lastRun) return;
+    this.unsynced = false;
+    this.readRun(this.lastRun);
+  }
+
+  /** The whole state to the Rust layout, after `setGraph`. */
+  private loadState() {
+    // `var`s in the copying loops, for QuickJS: see the note in quadtree.ts.
+    var nodes = this.nodes, n = nodes.length, i = 0, b = 0, node: SimNode;
+    var s = new Float64Array(n * 7);
+    for (i = 0; i < n; i++) {
+      node = nodes[i];
+      b = i * 7;
+      s[b] = node.x;
+      s[b + 1] = node.y;
+      s[b + 2] = node.vx;
+      s[b + 3] = node.vy;
+      s[b + 4] = node.fx ?? NaN;
+      s[b + 5] = node.fy ?? NaN;
+      s[b + 6] = node.r;
+    }
+    this.native!.load!(new Uint8Array(s.buffer));
+    this.pendingAll = 0;
+    this.pending.clear();
+    this.lastRun = null;
+    this.unsynced = false;
+    this.positions = null;
+  }
+
+  /** The velocities Rust kept, onto the nodes it has (before `setGraph` replaces them). */
+  private pullVelocities() {
+    this.sync();
+    var nodes = this.nodes, n = nodes.length, i = 0;
+    if (n === 0 || !this.native!.velocities) return;
+    const bytes = this.native!.velocities();
+    if (bytes.byteLength < n * 16) return;
+    var v = f64View(bytes, n * 2);
+    for (i = 0; i < n; i++) {
+      nodes[i].vx = v[i * 2];
+      nodes[i].vy = v[i * 2 + 1];
+    }
+  }
+
+  /** What JS changed since the last tick, to the Rust layout. */
+  private flush() {
+    var nodes = this.nodes, n = nodes.length, i = 0, b = 0, node: SimNode;
+    if (this.pendingAll !== 0) {
+      var s = new Float64Array(n * 5);
+      for (i = 0; i < n; i++) {
+        node = nodes[i];
+        b = i * 5;
+        s[b] = node.x;
+        s[b + 1] = node.y;
+        s[b + 2] = node.fx ?? NaN;
+        s[b + 3] = node.fy ?? NaN;
+        s[b + 4] = node.r;
+      }
+      this.native!.update!(new Uint8Array(s.buffer), this.pendingAll === 2 ? 1 : 0);
+    } else if (this.pending.size > 0) {
+      var p = new Float64Array(this.pending.size * 6);
+      b = 0;
+      for (const j of this.pending) {
+        node = nodes[j];
+        if (!node) continue;
+        p[b] = j;
+        p[b + 1] = node.x;
+        p[b + 2] = node.y;
+        p[b + 3] = node.fx ?? NaN;
+        p[b + 4] = node.fy ?? NaN;
+        p[b + 5] = node.r;
+        b += 6;
+      }
+      this.native!.patch!(new Uint8Array(p.buffer, 0, b * 8));
+    }
+    this.pendingAll = 0;
+    this.pending.clear();
+  }
+
+  /** `run`'s result onto the nodes: positions, alpha, and the pins the tick moved. */
+  private readRun(bytes: Uint8Array) {
+    var nodes = this.nodes, n = nodes.length, i = 0, node: SimNode;
+    if (bytes.byteLength < (n * 2 + 2) * 8) throw new Error(`ForceLayout.run returned ${bytes.byteLength} bytes for ${n} nodes`);
+    var out = f64View(bytes, bytes.byteLength / 8);
+    for (i = 0; i < n; i++) {
+      node = nodes[i];
+      node.x = out[i * 2];
+      node.y = out[i * 2 + 1];
+    }
+    this.alpha = out[n * 2];
+    var moved = out[n * 2 + 1], b = n * 2 + 2;
+    for (i = 0; i < moved; i++, b += 3) {
+      node = nodes[out[b]];
+      if (node && node.fx !== null) {
+        node.fx = out[b + 1];
+        node.fy = out[b + 2];
+      }
+    }
+  }
+
+  /** `iterations` ticks on the state the Rust layout keeps; the nodes get the positions unless `sync` is false. */
+  private tickKept(iterations: number, sync: boolean) {
+    if (this.unsynced && (this.pendingAll !== 0 || this.pending.size > 0)) this.sync();
+    this.flush();
+    const bytes = this.native!.run!(iterations, this.alpha, this.alphaTarget);
+    this.lastRun = bytes;
+    // The alpha is needed now (it says whether to tick again); positions can wait for `sync`.
+    const n = this.nodes.length;
+    if (bytes.byteLength >= (n * 2 + 1) * 8) this.alpha = f64View(bytes, n * 2 + 1)[n * 2];
+    this.unsynced = true;
+    if (sync) this.sync();
+    this.positions = bytes;
   }
 
   /** `iterations` ticks in Rust: the nodes' state goes over in one buffer and comes back in another. */
@@ -197,8 +356,12 @@ export class ForceSimulation {
     this.alphaTarget = 0;
   }
 
-  /** Advances `iterations` ticks. */
-  tick(iterations = 1) {
+  /**
+   * Advances `iterations` ticks. With the Rust layout and `sync` false, the nodes keep their positions
+   * until `sync()` (for loops of ticks that only look at `alpha` in between).
+   */
+  tick(iterations = 1, sync = true) {
+    if (this.kept) return this.tickKept(iterations, sync);
     if (this.native) return this.tickNative(iterations);
     const c = this.config;
     for (let k = 0; k < iterations; k++) {
@@ -334,4 +497,10 @@ export function phyllotaxis(i: number, cx = 0, cy = 0, spacing = 10): { x: numbe
   const radius = spacing * Math.sqrt(0.5 + i);
   const angle = i * Math.PI * (3 - Math.sqrt(5));
   return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+}
+
+/** The first `count` f64 of a buffer from Rust (copied when its offset is not a multiple of 8, as a Float64Array needs). */
+function f64View(bytes: Uint8Array, count: number): Float64Array {
+  const aligned = bytes.byteOffset % 8 === 0 ? bytes : bytes.slice();
+  return new Float64Array(aligned.buffer, aligned.byteOffset, count);
 }

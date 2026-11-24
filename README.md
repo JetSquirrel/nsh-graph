@@ -240,7 +240,9 @@ The package's Rust module, `nsh-graph/native` (source in `native/`), follows gpu
 batched painting. It moves the two hot paths out of QuickJS:
 
 - **`ForceLayout`**: the force simulation, the same forces step for step (the layouts match), at the
-  configured Barnes–Hut accuracy at every size.
+  configured Barnes–Hut accuracy at every size. It keeps the nodes' state between ticks: JS sends only what
+  it changed (a dragged or pinned node, or every node after a layout jumps), and a tick returns only
+  positions, which the painter takes as they are.
 - **`GraphPainter`**: edges and nodes traced as SVG path data, one path per state and color, that the canvas
   draws with a handful of `Path2D` calls instead of several calls per edge and node. Arrows, captions,
   rings and hulls are unchanged.
@@ -268,14 +270,14 @@ Measured in NSH's headless runtime (`nsh test perf`), TypeScript → Rust:
 
 | Graph | Tick | Settles in | Draw |
 |---|---|---|---|
-| Flare imports, 220 / 764 | 13 → 0.6 ms | 3.6 → 0.11 s | |
-| Star, 301 / 300 | 18 → 0.7 ms | 5.1 → 0.16 s | |
-| Scale-free, 1500 / 2997 | 73 → 3.4 ms | 20 → 0.9 s | 18 → 2.6 ms |
-| Scale-free, 5000 / 9997 | 285 → 13.5 ms | (minutes) → 3.6 s | 55 → 9.8 ms |
+| Flare imports, 220 / 764 | 7.4 → 0.3 ms | 2.0 → 0.06 s | |
+| Star, 301 / 300 | 9.8 → 0.5 ms | 2.7 → 0.10 s | |
+| Scale-free, 1500 / 2997 | 43 → 2.2 ms | 12 → 0.56 s | 8.8 → 3.2 ms |
+| Scale-free, 5000 / 9997 | 165 → 9 ms | (minutes) → 2.5 s | 34 → 11 ms |
 
-Edge-length spread and crowding are the same both ways. About a third of a 5000-node Rust tick is copying
-positions between JS objects and Rust, and most of the rest is the many-body force; `nsh run perf` shows
-1500 to 10000 nodes either way.
+Edge-length spread and crowding are the same both ways. Keeping the state in Rust took a 5000-node tick from
+12.8 to 8.3 ms, and a tick with the painter's positions from 14.3 to 8.8 ms, measured side by side in one
+process; most of what is left is the many-body force. `nsh run perf` shows 1500 to 10000 nodes either way.
 
 ## Compared with other libraries
 
@@ -322,7 +324,6 @@ with `nsh upgrade nsh-graph`.
 
 - Lasso selection (box selection is in)
 - Edge bundling and level-of-detail rendering for graphs of several thousand nodes
-- Keep positions in Rust between ticks, so a native tick no longer copies every node through JS
 
 ## License
 

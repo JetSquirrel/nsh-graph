@@ -17,12 +17,26 @@ export interface NativeForceLayout {
   setConfig(values: number[]): void;
   setGraph(count: number, links: Uint8Array, groups: Uint8Array): void;
   tick(state: Uint8Array, iterations: number, alpha: number, alphaTarget: number): Uint8Array;
+  /**
+   * The layout keeping the nodes' state between ticks (optional, so an older backend still works with
+   * `tick`): `load` the whole state (7 f64 per node: x, y, vx, vy, fx, fy, r), `update` every node
+   * (5 f64: x, y, fx, fy, r) or `patch` some (6 f64: index, x, y, fx, fy, r), then `run`, which returns
+   * x, y per node, the alpha, and the pins it moved (a count, then index, fx, fy each).
+   */
+  load?(state: Uint8Array): void;
+  update?(state: Uint8Array, resetVelocity: number): void;
+  patch?(entries: Uint8Array): void;
+  run?(iterations: number, alpha: number, alphaTarget: number): Uint8Array;
+  /** vx, vy per node. */
+  velocities?(): Uint8Array;
 }
 
 /** What `nsh-graph/native`'s `GraphPainter` offers: edges and nodes traced as SVG path data. */
 export interface NativeGraphPainter {
   setEdges(edges: Uint8Array): void;
   setNodes(nodes: Uint8Array): void;
+  /** Only the positions (x, y for each node `setNodes` gave; radii stay): the buffer `ForceLayout.run` returned. Optional. */
+  setPositions?(positions: Uint8Array): void;
   /** `style`: x0, y0, x1, y1, arrows (1 or 0), arrow length, then optionally decimals (0 to 2, default 2). */
   traceEdges(states: Uint8Array, style: number[]): string[];
   /** `view`: x0, y0, x1, y1, then optionally decimals (0 to 2, default 2). */

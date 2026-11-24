@@ -95,6 +95,22 @@ impl GraphPainter {
         Ok(())
     }
 
+    /// The nodes' positions for this frame: x, y for each node `setNodes` last gave (their radii stay). Takes the
+    /// buffer `ForceLayout.run` returned as it is (what follows the positions is ignored), so a frame
+    /// after a tick costs no copying in JS.
+    pub fn set_positions(&mut self, positions: Vec<u8>) -> Result<(), String> {
+        let n = self.r.len();
+        if positions.len() < n * 16 {
+            return Err(format!("positions for {n} nodes need {} bytes, not {}", n * 16, positions.len()));
+        }
+        let mut v = f64s(&positions);
+        for i in 0..n {
+            self.x[i] = v.next().unwrap();
+            self.y[i] = v.next().unwrap();
+        }
+        Ok(())
+    }
+
     /// The edges' paths, one u8 state per edge (0 dimmed, 1 normal, 2 highlighted, else left out), with
     /// `style` = x0, y0, x1, y1 (the graph-space view), arrows (1 or 0), arrow length, and optionally the
     /// most decimals a coordinate gets (0 to 2, default 2). Returns six strings: the lines and arrow heads
@@ -221,5 +237,225 @@ impl ForceLayout {
         }
         self.out.extend_from_slice(&self.sim.alpha.to_le_bytes());
         Ok(self.out.clone())
+    }
+
+    // ---- The layout keeps the nodes' state between ticks: JS sends what it changed, and gets positions
+    // back. On QuickJS, copying every node's seven values in and six out took a third of a tick.
+
+    /// Takes the whole state, 7 f64 per node (x, y, vx, vy, fx, fy, r; NaN for a free fx / fy), and keeps
+    /// it for `run`. The node count follows the state.
+    pub fn load(&mut self, state: Vec<u8>) -> Result<(), String> {
+        let v: Vec<f64> = f64s(&state).collect();
+        if state.len() % 8 != 0 || v.len() % IN != 0 {
+            return Err(format!("state must hold {IN} f64 per node"));
+        }
+        let n = v.len() / IN;
+        self.nodes.resize(n);
+        for (i, c) in v.chunks_exact(IN).enumerate() {
+            self.nodes.x[i] = c[0];
+            self.nodes.y[i] = c[1];
+            self.nodes.vx[i] = c[2];
+            self.nodes.vy[i] = c[3];
+            self.nodes.fx[i] = c[4];
+            self.nodes.fy[i] = c[5];
+            self.nodes.r[i] = c[6];
+        }
+        Ok(())
+    }
+
+    /// Changes every node at once, 5 f64 each (x, y, fx, fy, r), for the node count `load` gave. Their
+    /// velocities stay, or start over at 0 when `reset_velocity` is not 0.
+    pub fn update(&mut self, state: Vec<u8>, reset_velocity: f64) -> Result<(), String> {
+        const PER: usize = 5;
+        let n = self.nodes.len();
+        if state.len() != n * PER * 8 {
+            return Err(format!("update takes {PER} f64 for each of {n} nodes"));
+        }
+        let reset = reset_velocity != 0.;
+        for (i, c) in f64s(&state).collect::<Vec<_>>().chunks_exact(PER).enumerate() {
+            self.set_node(i, c[0], c[1], c[2], c[3], c[4], reset);
+        }
+        Ok(())
+    }
+
+    /// Changes some nodes, 6 f64 each: index, x, y, fx, fy, r. Their velocities stay. Indices past the
+    /// node count are skipped.
+    pub fn patch(&mut self, entries: Vec<u8>) -> Result<(), String> {
+        const PER: usize = 6;
+        if entries.len() % (PER * 8) != 0 {
+            return Err(format!("a patch entry is {PER} f64"));
+        }
+        for c in f64s(&entries).collect::<Vec<_>>().chunks_exact(PER) {
+            let i = c[0];
+            if i >= 0. && (i as usize) < self.nodes.len() {
+                self.set_node(i as usize, c[1], c[2], c[3], c[4], c[5], false);
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs `iterations` ticks from `alpha` toward `alphaTarget` on the state kept. Returns 2 f64 per node
+    /// (x, y), then the alpha reached, then how many pins the tick moved (it moves the pin of a node whose
+    /// position was not a finite number) and for each 3 f64: index, fx, fy.
+    pub fn run(&mut self, iterations: f64, alpha: f64, alpha_target: f64) -> Vec<u8> {
+        let n = self.nodes.len();
+        // Pins are moved only by the repair of a bad position, so they are compared only when one was.
+        let bad = (0..n).any(|i| !self.nodes.x[i].is_finite() || !self.nodes.y[i].is_finite());
+        let pins_before = if bad { Some((self.nodes.fx.clone(), self.nodes.fy.clone())) } else { None };
+        self.sim.alpha = alpha;
+        self.sim.alpha_target = alpha_target;
+        self.sim.tick(&mut self.nodes, iterations.clamp(0., 10_000.) as u32);
+
+        let mut moved: Vec<usize> = Vec::new();
+        if let Some((fx, fy)) = pins_before {
+            for i in 0..n {
+                let same = |a: f64, b: f64| a == b || (a.is_nan() && b.is_nan());
+                if !same(fx[i], self.nodes.fx[i]) || !same(fy[i], self.nodes.fy[i]) {
+                    moved.push(i);
+                }
+            }
+        }
+        self.out.clear();
+        self.out.reserve((n * 2 + 2 + moved.len() * 3) * 8);
+        for i in 0..n {
+            self.out.extend_from_slice(&self.nodes.x[i].to_le_bytes());
+            self.out.extend_from_slice(&self.nodes.y[i].to_le_bytes());
+        }
+        self.out.extend_from_slice(&self.sim.alpha.to_le_bytes());
+        self.out.extend_from_slice(&(moved.len() as f64).to_le_bytes());
+        for i in moved {
+            for v in [i as f64, self.nodes.fx[i], self.nodes.fy[i]] {
+                self.out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        std::mem::take(&mut self.out)
+    }
+
+    /// The velocities kept, 2 f64 per node (vx, vy).
+    pub fn velocities(&self) -> Vec<u8> {
+        let n = self.nodes.len();
+        let mut out = Vec::with_capacity(n * 16);
+        for i in 0..n {
+            out.extend_from_slice(&self.nodes.vx[i].to_le_bytes());
+            out.extend_from_slice(&self.nodes.vy[i].to_le_bytes());
+        }
+        out
+    }
+}
+
+impl ForceLayout {
+    #[allow(clippy::too_many_arguments)]
+    fn set_node(&mut self, i: usize, x: f64, y: f64, fx: f64, fy: f64, r: f64, reset_velocity: bool) {
+        let n = &mut self.nodes;
+        n.x[i] = x;
+        n.y[i] = y;
+        n.fx[i] = fx;
+        n.fy[i] = fy;
+        n.r[i] = r;
+        if reset_velocity {
+            n.vx[i] = 0.;
+            n.vy[i] = 0.;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bytes(v: &[f64]) -> Vec<u8> {
+        v.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+    fn floats(b: &[u8]) -> Vec<f64> {
+        f64s(b).collect()
+    }
+
+    /// A ring of `n` nodes with a chord, node 2 pinned.
+    fn layout(n: usize) -> (ForceLayout, Vec<f64>) {
+        let mut l = ForceLayout::new();
+        let mut pairs: Vec<u8> = Vec::new();
+        for i in 0..n as u32 {
+            pairs.extend_from_slice(&i.to_le_bytes());
+            pairs.extend_from_slice(&((i + 1) % n as u32).to_le_bytes());
+        }
+        pairs.extend_from_slice(&0u32.to_le_bytes());
+        pairs.extend_from_slice(&(n as u32 / 2).to_le_bytes());
+        let groups: Vec<u8> = (0..n as i32).flat_map(|i| (if i % 3 == 0 { 0i32 } else { -1i32 }).to_le_bytes()).collect();
+        l.set_graph(n as f64, pairs, groups).unwrap();
+        let mut state = Vec::new();
+        for i in 0..n {
+            let a = i as f64;
+            let pinned = i == 2;
+            state.extend_from_slice(&[a.cos() * 50. + a, a.sin() * 50., 0., 0., if pinned { 40. } else { f64::NAN }, if pinned { 5. } else { f64::NAN }, 10. + (i % 4) as f64]);
+        }
+        (l, state)
+    }
+
+    #[test]
+    fn keeping_the_state_gives_the_same_layout_as_sending_it_every_tick() {
+        let n = 40;
+        let (mut sent, mut state) = layout(n);
+        let (mut kept, s0) = layout(n);
+        kept.load(bytes(&s0)).unwrap();
+        let mut alpha = 1.;
+        for t in 0..30 {
+            // Half way, node 5 is dragged (pinned somewhere else) and every radius grows by 1.
+            if t == 15 {
+                state[5 * IN + 4] = -80.;
+                state[5 * IN + 5] = 30.;
+                kept.patch(bytes(&[5., state[5 * IN], state[5 * IN + 1], -80., 30., state[5 * IN + 6]])).unwrap();
+                let mut all = Vec::new();
+                for i in 0..n {
+                    state[i * IN + 6] += 1.;
+                    let b = i * IN;
+                    all.extend_from_slice(&[state[b], state[b + 1], state[b + 4], state[b + 5], state[b + 6]]);
+                }
+                kept.update(bytes(&all), 0.).unwrap();
+            }
+            let out = floats(&sent.tick(bytes(&state), 1., alpha, 0.).unwrap());
+            let got = floats(&kept.run(1., alpha, 0.));
+            for i in 0..n {
+                let b = i * IN;
+                for k in 0..OUT {
+                    state[b + k] = out[i * OUT + k];
+                }
+                assert_eq!(got[i * 2], out[i * OUT], "x of node {i} at tick {t}");
+                assert_eq!(got[i * 2 + 1], out[i * OUT + 1], "y of node {i} at tick {t}");
+            }
+            assert_eq!(got[n * 2], out[n * OUT], "alpha at tick {t}");
+            assert_eq!(got[n * 2 + 1], 0., "no pins moved");
+            alpha = out[n * OUT];
+        }
+        let v = floats(&kept.velocities());
+        for i in 0..n {
+            assert_eq!(v[i * 2], state[i * IN + 2]);
+            assert_eq!(v[i * 2 + 1], state[i * IN + 3]);
+        }
+    }
+
+    #[test]
+    fn a_bad_position_is_repaired_and_its_moved_pin_reported() {
+        let (mut l, mut s) = layout(6);
+        s[2 * IN] = f64::NAN; // node 2 is pinned, at a NaN position
+        l.load(bytes(&s)).unwrap();
+        let out = floats(&l.run(1., 1., 0.));
+        let n = 6;
+        assert!(out[..n * 2].iter().all(|v| v.is_finite()));
+        let moved = out[n * 2 + 1] as usize;
+        if moved > 0 {
+            assert_eq!(out[n * 2 + 2], 2.);
+        }
+    }
+
+    #[test]
+    fn update_can_start_velocities_over() {
+        let (mut l, s) = layout(8);
+        l.load(bytes(&s)).unwrap();
+        l.run(5., 1., 0.);
+        assert!(floats(&l.velocities()).iter().any(|v| *v != 0.));
+        let all: Vec<f64> = (0..8).flat_map(|i| [s[i * IN], s[i * IN + 1], s[i * IN + 4], s[i * IN + 5], s[i * IN + 6]]).collect();
+        l.update(bytes(&all), 1.).unwrap();
+        assert!(floats(&l.velocities()).iter().all(|v| *v == 0.));
+        assert!(l.update(bytes(&all[..10]), 0.).is_err());
     }
 }
