@@ -3,7 +3,7 @@
   "id": "dev.nshgraph.example",
   "version": "0.1.0",
   "build": 1,
-  "nsh": ">=0.6",
+  "nsh": ">=0.7",
   "window": { "title": "nsh-graph", "defaultSize": { "width": 1180, "height": 760 } },
   "resolve": {
     "alias": { "nsh-graph": "../src/index.ts" }
