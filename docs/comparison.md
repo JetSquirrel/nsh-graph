@@ -1,6 +1,6 @@
 # nsh-graph compared with other graph libraries
 
-*November 2026. nsh-graph 0.1.0, NSH 0.6.1. Benchmarks: d3-force 3.0.0, graphology-layout-forceatlas2 0.10.1, @antv/layout 2.0.0 (AntV G6 5.1), WebCola 3.4.0.*
+*November 2026. nsh-graph 0.2.0, NSH 0.7.0. Benchmarks: d3-force 3.0.0, graphology-layout-forceatlas2 0.10.1, @antv/layout 2.0.0 (AntV G6 5.1), WebCola 3.4.0.*
 
 ## Features
 
@@ -52,33 +52,33 @@ Compute time on a Windows Server VM, all engines in one session. Each engine had
 
 | Dataset | Engine | Time | Steps | Edge CV ↓ | Crowded ↓ | x/edge ↓ |
 |---|---|---|---|---|---|---|
-| Karate (34 / 78) | **nsh-graph** | **0.25 s** | 254 | **0.26** | **0.00%** | 0.95 |
-| | d3-force, same forces | 0.96 s | 300 | 0.27 | 0.00% | 1.06 |
-| | d3-force, defaults | 0.53 s | 300 | 0.33 | 0.71% | **0.88** |
-| | ForceAtlas2 | 0.30 s | 300 | 0.47 | 0.18% | **0.88** |
-| | AntV force | 2.00 s | 500 | **0.26** | 0.00% | 2.18 |
-| | AntV Fruchterman | 0.80 s | 1000 | 0.35 | 0.00% | 2.18 |
-| | WebCola | 0.82 s | 65 | 0.31 | 0.18% | 1.05 |
-| Les Misérables (77 / 254) | **nsh-graph** | **0.60 s** | 275 | 0.53 | 0.38% | 3.71 |
-| | d3-force, same forces | 2.61 s | 300 | 0.46 | 0.51% | 3.61 |
-| | d3-force, defaults | 1.61 s | 300 | 0.54 | 0.68% | 3.87 |
-| | ForceAtlas2 | 1.10 s | 300 | 0.63 | 1.44% | **3.28** |
-| | AntV force | 5.71 s | 500 | **0.37** | 0.48% | 9.40 |
-| | AntV Fruchterman | 3.41 s | 1000 | 0.43 | 0.07% | 4.44 |
-| | WebCola | 26.1 s | 496 | 0.48 | **0.03%** | 3.82 |
-| Flare imports (220 / 764) | **nsh-graph** | **2.0 s** | 291 | 0.51 | 0.62% | 10.68 |
-| | d3-force, same forces | 10.3 s | 300 | 0.51 | 0.63% | 10.43 |
-| | d3-force, defaults | 6.5 s | 300 | 0.62 | 0.73% | 9.69 |
-| | ForceAtlas2 | 6.8 s | 300 | 0.65 | 0.83% | **9.28** |
-| | AntV force | 19.2 s | 500 | **0.37** | 0.84% | 24.41 |
-| | AntV Fruchterman | 23.5 s | 1000 | 0.43 | 0.78% | 17.18 |
-| | WebCola | stopped at 120 s | 304 | 0.45 | **0.27%** | 10.33 |
-| Scale-free (1500 / 2997) | **nsh-graph** | **11.6 s** | 298 | 0.49 | 1.10% | – |
-| | d3-force, same forces | 95.9 s | 300 | 0.49 | 1.09% | – |
-| | d3-force, defaults | 66.3 s | 300 | 0.50 | **1.07%** | – |
-| | ForceAtlas2 (Barnes–Hut) | 77.6 s | 300 | 0.53 | 1.17% | – |
-| | AntV force | stopped at 120 s | 340 / 500 | **0.39** | 2.12% | – |
-| | AntV Fruchterman | stopped at 120 s | 118 / 1000 | 0.52 | 6.18% | – |
+| Karate (34 / 78) | **nsh-graph** | **0.23 s** | 254 | 0.26 | **0.00%** | 0.95 |
+| | d3-force, same forces | 0.89 s | 300 | 0.27 | 0.00% | 1.06 |
+| | d3-force, defaults | 0.52 s | 300 | 0.33 | 0.71% | **0.88** |
+| | ForceAtlas2 | 0.28 s | 300 | 0.47 | 0.18% | **0.88** |
+| | AntV force | 1.18 s | 326 | **0.23** | 0.00% | 1.65 |
+| | AntV Fruchterman | 0.73 s | 1000 | 0.35 | 0.00% | 2.10 |
+| | WebCola | 0.65 s | 65 | 0.31 | 0.18% | 1.05 |
+| Les Misérables (77 / 254) | **nsh-graph** | **0.60 s** | 271 | 0.53 | 0.38% | 3.71 |
+| | d3-force, same forces | 2.49 s | 300 | 0.46 | 0.51% | 3.61 |
+| | d3-force, defaults | 1.53 s | 300 | 0.54 | 0.68% | 3.87 |
+| | ForceAtlas2 | 1.07 s | 300 | 0.63 | 1.44% | **3.28** |
+| | AntV force | 5.30 s | 500 | **0.39** | 0.24% | 7.93 |
+| | AntV Fruchterman | 3.21 s | 1000 | 0.46 | **0.00%** | 4.68 |
+| | WebCola | 24.2 s | 496 | 0.48 | 0.03% | 3.82 |
+| Flare imports (220 / 764) | **nsh-graph** | **2.1 s** | 291 | 0.51 | 0.62% | 10.68 |
+| | d3-force, same forces | 10.0 s | 300 | 0.51 | 0.63% | 10.43 |
+| | d3-force, defaults | 6.4 s | 300 | 0.62 | 0.73% | 9.69 |
+| | ForceAtlas2 | 6.5 s | 300 | 0.65 | 0.83% | **9.28** |
+| | AntV force | 19.0 s | 500 | **0.36** | 0.71% | 22.95 |
+| | AntV Fruchterman | 22.2 s | 1000 | 0.44 | 0.70% | 16.26 |
+| | WebCola | stopped at 120 s | 310 | 0.45 | **0.27%** | 10.32 |
+| Scale-free (1500 / 2997) | **nsh-graph** | **12.1 s** | 298 | 0.49 | 1.10% | – |
+| | d3-force, same forces | 98.9 s | 300 | 0.49 | 1.09% | – |
+| | d3-force, defaults | 67.6 s | 300 | 0.50 | **1.07%** | – |
+| | ForceAtlas2 (Barnes–Hut) | 76.0 s | 300 | 0.53 | 1.17% | – |
+| | AntV force | stopped at 120 s | 338 / 500 | **0.40** | 2.10% | – |
+| | AntV Fruchterman | stopped at 120 s | 121 / 1000 | 0.52 | 6.08% | – |
 | | WebCola | can't run | – | – | – | – |
 
 WebCola can't run the 1500-node graph: its setup computes all-pairs shortest paths in one call, which runs past
@@ -86,28 +86,28 @@ NSH's 2 s limit, and NSH interrupts it. Crossings aren't counted past 800 edges.
 
 What it shows:
 
-- **Same forces, same result, 3.8–8.3× faster than d3-force on QuickJS.** With identical forces, nsh-graph and
+- **Same forces, same result, 3.9–8.2× faster than d3-force on QuickJS.** With identical forces, nsh-graph and
   d3-force land on layouts of the same quality (edge CV and crowding match to two decimals), so the simulation is
-  correct. nsh-graph is 3.8–5.1× faster on graphs up to 220 nodes: its typed-array quadtree allocates nothing
+  correct. nsh-graph is 3.9–4.8× faster on graphs up to 220 nodes: its typed-array quadtree allocates nothing
   per tick, and its loops are written for an interpreter (the tree walk follows precomputed links instead of a
   stack, and the locals are `var`s, which QuickJS reads without the checks it makes on `let` and `const`). On
-  the 1500-node graph it is 8.3× faster, partly because it coarsens Barnes–Hut past 300 nodes (θ ≈ 1.4 instead
+  the 1500-node graph it is 8.2× faster, partly because it coarsens Barnes–Hut past 300 nodes (θ ≈ 1.4 instead
   of 0.9).
-- **AntV G6's layouts are 3–12× slower and cross more edges.** AntV force takes 8–9.5× as long as nsh-graph on
-  every graph that finishes, and Fruchterman 3–12×. Neither finishes 1500 nodes within the budget. AntV force
-  spaces edges most evenly on the three larger graphs (edge CV 0.37–0.39), but its layouts cross 2.3–2.5× as
-  many edges as nsh-graph's. That is how G6 behaves by default; a G6 app would tune `linkDistance` and the
-  strengths.
-- **WebCola spaces nodes best and is the slowest.** Stress majorization gives the fewest pile-ups (0.03% on Les
-  Misérables, 0.27% on Flare). But it took 26 s on 77 nodes, didn't finish 220 nodes in 120 s, and can't run
-  1500 in NSH at all.
+- **AntV G6's layouts are 3–11× slower and cross more edges.** AntV force takes 5–9× as long as nsh-graph on
+  every graph that finishes (on Karate its movement rule stops it at 326 steps), and Fruchterman 3–11×. Neither
+  finishes 1500 nodes within the budget. AntV force spaces edges most evenly on every graph (edge CV 0.23–0.40),
+  but its layouts cross 1.7–2.2× as many edges as nsh-graph's. That is how G6 behaves by default; a G6 app would
+  tune `linkDistance` and the strengths.
+- **WebCola avoids pile-ups and is the slowest.** Stress majorization gives the fewest pile-ups on Flare (0.27%)
+  and nearly none on Les Misérables (0.03%, where AntV Fruchterman reaches 0.00%). But it took 24 s on 77 nodes,
+  didn't finish 220 nodes in 120 s, and can't run 1500 in NSH at all.
 - **ForceAtlas2 crosses the fewest edges.** Its stronger clustering gives 7–13% fewer crossings than nsh-graph.
   Its edges are the least even (edge CV 0.47–0.65). A crossing-reducing pass, or an FA2-style "LinLog" mode,
   would be a reasonable addition to nsh-graph.
 - **No JS engine lays out 1500 nodes interactively in QuickJS.** nsh-graph is the fastest at 12 s, d3-force and
-  ForceAtlas2 take 66–96 s, and the AntV layouts don't finish in 120 s. For graphs that size, use nsh-graph's
-  Rust backend (`nsh-graph/native`, measured with `nsh test perf`: the same 1500 nodes settle in 0.56 s, 5000 in
-  2.5 s), static layouts or precomputed positions.
+  ForceAtlas2 take 68–99 s, and the AntV layouts don't finish in 120 s. For graphs that size, use nsh-graph's
+  Rust backend (`nsh-graph/native`, measured with `nsh test perf`: the same 1500 nodes settle in 0.52 s, 5000 in
+  2.4 s), static layouts or precomputed positions.
 
 Engines that can't run in NSH at all: **Cytoscape.js** fails to load, because it assigns to a frozen built-in
 prototype. **ngraph.forcelayout** (behind VivaGraph and ngraph) generates its physics code with `new Function`,

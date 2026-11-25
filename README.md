@@ -266,17 +266,17 @@ with the app's dev profile, about ten times slower. If you use one, add this to 
 opt-level = 3
 ```
 
-Measured in NSH's headless runtime (`nsh test perf`), TypeScript → Rust:
+Measured in NSH 0.7's headless runtime (`nsh test perf`, best of three runs), TypeScript → Rust:
 
 | Graph | Tick | Settles in | Draw |
 |---|---|---|---|
-| Flare imports, 220 / 764 | 7.4 → 0.3 ms | 2.0 → 0.06 s | |
-| Star, 301 / 300 | 9.8 → 0.5 ms | 2.7 → 0.10 s | |
-| Scale-free, 1500 / 2997 | 43 → 2.2 ms | 12 → 0.56 s | 8.8 → 3.2 ms |
-| Scale-free, 5000 / 9997 | 165 → 9 ms | (minutes) → 2.5 s | 34 → 11 ms |
+| Flare imports, 220 / 764 | 6.9 → 0.2 ms | 1.9 → 0.06 s | |
+| Star, 301 / 300 | 9.5 → 0.2 ms | 2.7 → 0.09 s | |
+| Scale-free, 1500 / 2997 | 42 → 2.1 ms | 11 → 0.52 s | 8.6 → 3.0 ms |
+| Scale-free, 5000 / 9997 | 156 → 8.6 ms | (minutes) → 2.4 s | 33 → 11 ms |
 
 Edge-length spread and crowding are the same both ways. Keeping the state in Rust took a 5000-node tick from
-12.8 to 8.3 ms, and a tick with the painter's positions from 14.3 to 8.8 ms, measured side by side in one
+11.8 to 8.0 ms, and a tick with the painter's positions from 14.0 to 7.8 ms, measured side by side in one
 process; most of what is left is the many-body force. `nsh run perf` shows 1500 to 10000 nodes either way.
 
 ## Compared with other libraries
@@ -285,8 +285,8 @@ process; most of what is left is the many-body force. `nsh run perf` shows 1500 
 AntV G6, vis-network, ECharts and d3-force, feature by feature. It also has layout benchmarks run inside NSH's
 runtime (`nsh test bench`), against d3-force, ForceAtlas2, AntV G6's force and Fruchterman layouts
 (@antv/layout) and WebCola. nsh-graph is the fastest on every dataset. With the same forces, it matches
-d3-force's layout quality at 3.8–8.3× the speed, and it lays out 3–12× faster than AntV's layouts with fewer
-edge crossings (AntV force has 2.3–2.5× as many). ForceAtlas2 crosses fewer edges, and WebCola piles up fewer
+d3-force's layout quality at 3.9–8.2× the speed, and it lays out 3–11× faster than AntV's layouts with fewer
+edge crossings (AntV force has 1.7–2.2× as many). ForceAtlas2 crosses fewer edges, and WebCola piles up fewer
 nodes but is far slower.
 
 ## Datasets and gallery
@@ -317,7 +317,7 @@ cargo test                      # the Rust crate on its own
 package the way an app does (`"dependencies": { "nsh-graph": { "path": ".." } }`), so it also builds the crate.
 
 To release: bump `version` in `Cargo.toml`, then `cargo publish` and tag the same version
-(`git tag v0.2.0 && git push --tags`), which is what `nsh add github:JetSquirrel/nsh-graph` installs. Apps update
+(`git tag v0.3.0 && git push --tags`), which is what `nsh add github:JetSquirrel/nsh-graph` installs. Apps update
 with `nsh upgrade nsh-graph`.
 
 ## Roadmap
