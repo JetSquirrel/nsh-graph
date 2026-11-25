@@ -51,6 +51,13 @@ jobs:
           # nsh names its output folder after the app; take whatever single folder it made.
           cp -r build/demo/*/. _site/demo/
           cp -r build/gallery/*/. _site/gallery/
+          # Each deploy replaces the hashed app files, but browsers keep the apps' index.html for a while
+          # (Pages sends max-age=600), and a stale one imports files that are gone ("Failed to fetch
+          # dynamically imported module"). A per-deploy query makes the landing page's links and the demo
+          # iframe fetch the current index.html. The grep fails the build if no link was stamped.
+          v="${GITHUB_SHA::10}"
+          sed -i -E "s#(href|src)=\"(demo|gallery)/\"#\1=\"\2/?v=$v\"#g" _site/index.html
+          grep -c "/?v=$v\"" _site/index.html
           # Pages compresses on its own; the precompressed copies only add weight.
           find _site -name '*.br' -delete -o -name '*.gz' -delete
           touch _site/.nojekyll
