@@ -1,6 +1,6 @@
 [package]
 name = "nsh-graph"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "An interactive network graph view for Native Shell (NSH): TSX components with the force layout and painting in Rust"
