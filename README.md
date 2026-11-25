@@ -43,7 +43,7 @@ This adds it to `"dependencies"` in the app's nsh.json and pins it in `nsh.lock`
 and, optionally, the Rust backend from `"nsh-graph/native"` (see [Rust backend](#rust-backend)). The package
 includes Rust, so the app builds with the Rust toolchain (and the `wasm32-unknown-unknown` target for the web).
 
-Requires NSH 0.6 or later. 0.6 added `onKeyDown`, `onPinch` and `captureKeys`, which the view uses.
+Requires NSH 0.7 or later (its Rust side builds against `nsh-core` 0.7). 0.6 added `onKeyDown`, `onPinch` and `captureKeys`, which the view uses.
 
 ## Use
 
